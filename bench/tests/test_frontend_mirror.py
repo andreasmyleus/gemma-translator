@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import unittest
 
 from bench.frontend_mirror import (
@@ -76,6 +90,37 @@ class TestParseTranslation(unittest.TestCase):
 
     def test_falls_back_to_raw_text_when_not_json(self):
         self.assertEqual(parse_translation("Where is it?"), "Where is it?")
+
+    # Nedan speglar JS:ens `parsed.translation || ""`. Verifierat mot node med
+    # translateText-blocket i api.js:126-144 kopierat rakt av.
+    def test_null_translation_becomes_empty_string(self):
+        self.assertEqual(parse_translation('{"translation": null}'), "")
+
+    def test_falsy_translation_values_become_empty_string(self):
+        self.assertEqual(parse_translation('{"translation": ""}'), "")
+        self.assertEqual(parse_translation('{"translation": 0}'), "")
+        self.assertEqual(parse_translation('{"translation": false}'), "")
+
+    def test_missing_key_becomes_empty_string(self):
+        self.assertEqual(parse_translation('{"other": "x"}'), "")
+
+    def test_valid_json_that_is_not_an_object_becomes_empty_string(self):
+        # Property-access på ett tal, en array eller en sträng ger undefined
+        # i JS, och `undefined || ""` normaliserar till "".
+        self.assertEqual(parse_translation("5"), "")
+        self.assertEqual(parse_translation("[1,2,3]"), "")
+        self.assertEqual(parse_translation('"hello"'), "")
+
+    def test_bare_null_falls_back_to_raw_text(self):
+        # Specialfall: `null.translation` kastar TypeError inne i JS:ens
+        # try-block, så appen hamnar i catch och visar rå text — till skillnad
+        # från 5/[1,2,3]/"hello" ovan, som ger "".
+        self.assertEqual(parse_translation("null"), "null")
+
+    def test_nonstandard_json_constants_fall_back_to_raw_text(self):
+        # Pythons json godtar NaN/Infinity, JSON.parse gör det inte.
+        self.assertEqual(parse_translation("NaN"), "NaN")
+        self.assertEqual(parse_translation('{"translation": NaN}'), '{"translation": NaN}')
 
 
 if __name__ == "__main__":

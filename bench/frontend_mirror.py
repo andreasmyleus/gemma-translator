@@ -22,7 +22,7 @@ Speglar:
   frontend/src/utils/api.js:154-168  splitTextIntoSpeechChunks
   frontend/src/utils/api.js:72-83    generatePayloadJSON
   frontend/src/utils/api.js:126-144  JSON-uttolkningen i translateText
-  frontend/src/TranslatorApp.jsx:229 systemprompten i handleRecordStop
+  frontend/src/TranslatorApp.jsx:229 systemprompten i processTranslation
 
 Ändras någon av dem måste den här filen ändras i samma commit.
 """
@@ -56,7 +56,7 @@ def split_text_into_speech_chunks(text, limit=SPEECH_CHUNK_LIMIT):
 
 
 def system_prompt(src_name, dst_name):
-    """Speglar prompten som byggs i TranslatorApp.jsx:229 (handleRecordStop)."""
+    """Speglar prompten som byggs i TranslatorApp.jsx:229 (processTranslation)."""
     src = src_name.split(" ")[0]
     dst = dst_name.split(" ")[0]
     return (
@@ -82,6 +82,11 @@ def build_llm_payload(text, model, system_prompt_text):
     return {"model": model or "gemma4-e2b", "messages": messages}
 
 
+def _reject_js_nonstandard_constant(constant):
+    """JSON.parse godtar inte NaN/Infinity/-Infinity — det gör Pythons json."""
+    raise ValueError(f"JSON.parse rejects {constant}")
+
+
 def parse_translation(model_response):
     """Speglar JSON-uttolkningen i translateText (api.js:126-144).
 
@@ -89,6 +94,17 @@ def parse_translation(model_response):
     tolererar ```-staket och faller tillbaka på rå text om parsningen
     misslyckas. Bench måste falla tillbaka likadant, annars mäter vi WER på
     en sträng som appen aldrig hade visat.
+
+    JS gör `parsed.translation || ""` inuti try-blocket, vilket ger tre
+    beteenden som en naiv `.get("translation", "")` inte återger:
+
+      {"translation": null}  ->  ""   (null är falsy, inte "nyckel saknas")
+      5 / [1,2,3] / "hej"    ->  ""   (property-access ger undefined)
+      null                   ->  rå   (null.translation kastar TypeError,
+                                       som fångas av samma catch som ett
+                                       parse-fel)
+
+    Bara ett äkta parse-fel (ValueError) faller alltså tillbaka på rå text.
     """
     clean = model_response.strip()
     if clean.startswith("```json"):
@@ -98,7 +114,19 @@ def parse_translation(model_response):
     if clean.endswith("```"):
         clean = clean[:-3]
     clean = clean.strip()
+
     try:
-        return json.loads(clean).get("translation", "")
-    except (ValueError, AttributeError):
+        parsed = json.loads(clean, parse_constant=_reject_js_nonstandard_constant)
+    except ValueError:
         return model_response
+
+    if parsed is None:
+        # `null.translation` kastar TypeError inne i JS:ens try-block, så
+        # appen hamnar i catch och visar rå text.
+        return model_response
+    if not isinstance(parsed, dict):
+        return ""
+    # `or ""` speglar JS:ens `|| ""` för null, "", 0 och false. JS och Python
+    # är oense om [] och {} (truthy i JS, falsy här), men en tom array/objekt
+    # renderas ändå som ingenting i UI:t, så "" är rätt sträng att mäta mot.
+    return parsed.get("translation") or ""
