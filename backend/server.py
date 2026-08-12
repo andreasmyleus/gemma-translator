@@ -147,6 +147,10 @@ def transcribe(audio_np, language):
         audio_np,
         language=language if language in SUPPORTED_STT_LANGS else None,
         beam_size=1,
+        # Klipper bort tystnad före dekodning. Kortar ljudet som når modellen
+        # och tar bort de hallucinationer stock-Whisper gärna producerar på
+        # tysta partier.
+        vad_filter=True,
     )
     return " ".join(s.text.strip() for s in segments)
 
