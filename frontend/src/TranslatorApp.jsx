@@ -17,6 +17,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react"
 import LanguageLane from "./components/LanguageLane"
 import ResponseDrawer from "./components/ResponseDrawer"
+import TranscriptView from "./components/TranscriptView"
 import Visualizer from "./components/Visualizer"
 import { useAudioRecorder } from "./hooks/useAudioRecorder"
 import {
@@ -42,24 +43,43 @@ const AVAILABLE_LANGUAGES = [
   { code: "ko", name: "Korean", voice: "tts", ttsLang: "ko" },
 ]
 
-function TranslatorApp({ config }) {
+const languageName = (code) =>
+  AVAILABLE_LANGUAGES.find((l) => l.code === code)?.name || ""
+
+// How long the drawer lingers when TTS can't tell us playback has ended.
+const DRAWER_FALLBACK_MS = 4000
+
+// Drawer copy for the newest turn: placeholders stand in for the stages that
+// haven't landed yet.
+const drawerSourceText = (turn) => {
+  if (!turn) return ""
+  if (turn.status === "transcribing") return "Listening..."
+  if (turn.status === "error" && !turn.sourceText) return "(Transcription failed)"
+  return turn.sourceText
+}
+
+const drawerTargetText = (turn) => {
+  if (!turn) return ""
+  if (turn.status === "error") return `Error: ${turn.error}`
+  if (turn.status === "empty") return "(No speech detected)"
+  return turn.targetText || "Translating..."
+}
+
+function TranslatorApp({ config, clearConversationRef }) {
   // UI State
   const [isDrawerOpen, setIsDrawerOpen] = useState(false)
   const [activePerson, setActivePerson] = useState(1)
 
-  // Translation State
-  const [transcriptionData, setTranscriptionData] = useState({
-    source: "",
-    text: "— listening —",
-  })
-  const [translationData, setTranslationData] = useState({
-    target: "",
-    text: "— waiting —",
-  })
-  const [metaText, setMetaText] = useState("")
+  // Conversation State: append-only turns plus the language pair the columns
+  // locked to when the conversation started.
+  const [turns, setTurns] = useState([])
+  const [columns, setColumns] = useState(null)
+  const nextTurnId = useRef(1)
 
   // Currently-playing TTS audio element (chunked playback chain)
   const onlineAudioPlayerRef = useRef(null)
+  // Pending drawer auto-dismiss timer (fallback when TTS can't signal the end)
+  const dismissTimerRef = useRef(null)
 
   // Language Lanes State
   const [lang1Index, setLang1Index] = useState(0)
@@ -69,16 +89,33 @@ function TranslatorApp({ config }) {
   const { isRecording, startRecording, stopRecording, analyser, micError } =
     useAudioRecorder()
 
+  // A mic failure takes over the drawer; it isn't a turn.
   useEffect(() => {
-    if (micError) {
-      setIsDrawerOpen(true)
-      setTranscriptionData({ source: "Microphone", text: "Access Failed" })
-      setTranslationData({
-        target: "Error",
-        text: `${micError} (HTTPS is required when accessing from remote devices)`,
-      })
-    }
+    if (micError) setIsDrawerOpen(true)
   }, [micError])
+
+  const clearDismissTimer = useCallback(() => {
+    if (dismissTimerRef.current) {
+      clearTimeout(dismissTimerRef.current)
+      dismissTimerRef.current = null
+    }
+  }, [])
+
+  useEffect(() => clearDismissTimer, [clearDismissTimer])
+
+  const closeDrawer = useCallback(() => {
+    clearDismissTimer()
+    setIsDrawerOpen(false)
+  }, [clearDismissTimer])
+
+  // Fallback dismissal for when no TTS playback marks the end of the exchange.
+  const closeDrawerAfterDelay = useCallback(() => {
+    clearDismissTimer()
+    dismissTimerRef.current = setTimeout(() => {
+      dismissTimerRef.current = null
+      setIsDrawerOpen(false)
+    }, DRAWER_FALLBACK_MS)
+  }, [clearDismissTimer])
 
   const stopSpeaking = useCallback(() => {
     if (onlineAudioPlayerRef.current) {
@@ -89,19 +126,29 @@ function TranslatorApp({ config }) {
 
   // Speak text via /api/tts, splitting into ~180-char chunks and chaining
   // playback so long translations don't overflow a single TTS request.
+  // onFinished(played) fires exactly once, so callers can react to the end of
+  // playback without double-handling an error that also rejects play().
   const playTTS = useCallback(
-    (text, targetLang) => {
-      if (!text) return
+    (text, targetLang, onFinished) => {
+      let settled = false
+      const finish = (played) => {
+        if (settled) return
+        settled = true
+        onFinished?.(played)
+      }
+
+      if (!text) return finish(false)
       stopSpeaking()
 
       const chunks = splitTextIntoSpeechChunks(text)
-      if (chunks.length === 0) return
+      if (chunks.length === 0) return finish(false)
 
       let chunkIndex = 0
 
       const playNextChunk = () => {
         if (chunkIndex >= chunks.length) {
           stopSpeaking()
+          finish(true)
           return
         }
         const ttsUrl = `/api/tts?text=${encodeURIComponent(chunks[chunkIndex])}&lang=${encodeURIComponent(targetLang)}`
@@ -115,11 +162,13 @@ function TranslatorApp({ config }) {
         }
         player.onerror = () => {
           stopSpeaking()
+          finish(false)
           alert("TTS playback failed. Backend server may be offline.")
         }
         player.play().catch((e) => {
           console.error("Audio play error:", e)
           stopSpeaking()
+          finish(false)
         })
       }
 
@@ -155,6 +204,9 @@ function TranslatorApp({ config }) {
     async (lane) => {
       if (isRecording) return
       stopSpeaking()
+      // Drop any dismissal left over from the previous exchange so timers
+      // from consecutive recordings can't stack up and close the new one.
+      clearDismissTimer()
 
       setActivePerson((prev) => {
         if (prev !== lane) playBlip("speaker")
@@ -174,7 +226,7 @@ function TranslatorApp({ config }) {
         processTranslation(lane, result.base64Data)
       }
     },
-    [isRecording, stopSpeaking, startRecording],
+    [isRecording, stopSpeaking, startRecording, clearDismissTimer],
   )
 
   const handleRecordStop = useCallback(async () => {
@@ -185,9 +237,16 @@ function TranslatorApp({ config }) {
     processTranslation(recordedLane, audioData.base64Data)
   }, [activeLaneRecording, stopRecording])
 
+  // Patch a single turn in place, so a running pipeline never disturbs the
+  // turns around it.
+  const updateTurn = useCallback((id, patch) => {
+    setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)))
+  }, [])
+
   // Translation Pipeline
   const processTranslation = async (lane, base64Data) => {
     setIsDrawerOpen(true)
+    clearDismissTimer()
 
     const src =
       lane === 1
@@ -198,29 +257,52 @@ function TranslatorApp({ config }) {
         ? AVAILABLE_LANGUAGES[lang2Index]
         : AVAILABLE_LANGUAGES[lang1Index]
 
-    setTranscriptionData({
-      source: `${src.name} (Source)`,
-      text: "Analyzing voice input...",
-    })
-    setTranslationData({
-      target: `${dst.name} (Translation)`,
-      text: "Translating...",
-    })
-    setMetaText("")
+    const turnId = nextTurnId.current++
+    setTurns((prev) => [
+      ...prev,
+      {
+        id: turnId,
+        lane,
+        sourceLang: src.code,
+        targetLang: dst.code,
+        sourceText: "",
+        targetText: "",
+        status: "transcribing",
+        error: null,
+        meta: "",
+      },
+    ])
+
+    // The columns lock to the pair in play at the first turn and never move.
+    setColumns((prev) =>
+      prev
+        ? prev
+        : {
+            left: {
+              code: AVAILABLE_LANGUAGES[lang1Index].code,
+              name: AVAILABLE_LANGUAGES[lang1Index].name,
+            },
+            right: {
+              code: AVAILABLE_LANGUAGES[lang2Index].code,
+              name: AVAILABLE_LANGUAGES[lang2Index].name,
+            },
+          },
+    )
 
     try {
       // 1. Transcription
-      setTranscriptionData((prev) => ({ ...prev, text: "Listening..." }))
       const transcribedText = await transcribeAudio(base64Data, src.code)
-      setTranscriptionData((prev) => ({ ...prev, text: transcribedText }))
 
       if (!transcribedText.trim()) {
-        setTranslationData((prev) => ({
-          ...prev,
-          text: "(No speech detected)",
-        }))
+        updateTurn(turnId, { status: "empty" })
+        closeDrawerAfterDelay()
         return
       }
+
+      updateTurn(turnId, {
+        sourceText: transcribedText,
+        status: "translating",
+      })
 
       // 2. Translation
       const result = await translateText(transcribedText, {
@@ -229,24 +311,49 @@ function TranslatorApp({ config }) {
         systemPrompt: `You are a high-performance translator. Your task is to translate text from ${src.name.split(" ")[0]} into ${dst.name.split(" ")[0]}.\nYou MUST format your response as a valid JSON object matching this structure:\n{\n  "translation": "High-quality, natural translation into ${dst.name.split(" ")[0]}"\n}\nDo NOT return anything else except this JSON object. No Markdown block wraps (no \`\`\`json), no introductory text, no conversational text. Start directly with "{" and end directly with "}".`,
       })
 
-      setTranslationData((prev) => ({ ...prev, text: result.translation }))
-      setMetaText(`Duration: ${result.duration}s | Tokens: ${result.tokens}`)
+      updateTurn(turnId, {
+        targetText: result.translation,
+        meta: `Duration: ${result.duration}s | Tokens: ${result.tokens}`,
+        status: "done",
+      })
 
+      // The drawer hands over to the transcript once the translation has been
+      // spoken; without playback a timer stands in for that beat.
       if (config.enableTts) {
-        playTTS(result.translation, dst.ttsLang)
+        playTTS(result.translation, dst.ttsLang, (played) => {
+          if (played) closeDrawer()
+          else closeDrawerAfterDelay()
+        })
+      } else {
+        closeDrawerAfterDelay()
       }
     } catch (err) {
       console.error(err)
-      setTranscriptionData((prev) => ({
-        ...prev,
-        text: prev.text === "Listening..." ? "(Transcription failed)" : prev.text,
-      }))
-      setTranslationData((prev) => ({ ...prev, text: `Error: ${err.message}` }))
+      updateTurn(turnId, { status: "error", error: err.message })
+      closeDrawerAfterDelay()
     }
   }
 
+  // Wipe the conversation; clearing columns lets a fresh language pair lock.
+  const handleClearConversation = useCallback(() => {
+    stopSpeaking()
+    setTurns([])
+    setColumns(null)
+    closeDrawer()
+  }, [stopSpeaking, closeDrawer])
+
+  // The settings overlay lives in App.jsx but the conversation lives here, so
+  // App borrows the handler through a ref rather than us lifting the state up.
+  useEffect(() => {
+    if (!clearConversationRef) return
+    clearConversationRef.current = handleClearConversation
+    return () => {
+      clearConversationRef.current = null
+    }
+  }, [clearConversationRef, handleClearConversation])
+
   // Push-to-talk keyboard control (two modes, see README):
-  // landscape = one "active person" driven by Space/Z/arrows;
+  // landscape = one "active person" driven by Enter/Space/arrows;
   // vertical   = independent per-lane keys (Z/X for record, arrows and -/+).
   // keydown starts recording, keyup stops — e.repeat guards auto-repeat.
   useEffect(() => {
@@ -255,13 +362,13 @@ function TranslatorApp({ config }) {
       const key = e.key.toLowerCase()
 
       if (config.keyboardMode === "landscape") {
-        if (key === " " || e.key === "Spacebar") {
+        if (e.key === "Enter") {
           e.preventDefault()
           if (!isRecording) {
             playBlip("speaker")
             setActivePerson((p) => (p === 1 ? 2 : 1))
           }
-        } else if (key === "z") {
+        } else if (key === " " || e.key === "Spacebar") {
           e.preventDefault()
           if (!e.repeat && !isRecording) handleRecordStart(activePerson)
         } else if (e.key === "ArrowLeft") {
@@ -299,9 +406,9 @@ function TranslatorApp({ config }) {
       const key = e.key.toLowerCase()
 
       if (config.keyboardMode === "landscape") {
-        // Always attempt stop on Z release — the recorder hook no-ops if idle,
-        // and marks a pending stop if getUserMedia is still opening.
-        if (key === "z") handleRecordStop()
+        // Always attempt stop on Space release — the recorder hook no-ops if
+        // idle, and marks a pending stop if getUserMedia is still opening.
+        if (key === " " || e.key === "Spacebar") handleRecordStop()
       } else {
         if (key === "z" || key === "x") handleRecordStop()
       }
@@ -323,16 +430,39 @@ function TranslatorApp({ config }) {
     handleRotateLanguage,
   ])
 
+  // The drawer is a view of the newest turn, not state of its own.
+  const latestTurn = turns[turns.length - 1] ?? null
+
+  const drawerProps = micError
+    ? {
+        transcriptionSource: "Microphone",
+        transcriptionText: "Access Failed",
+        translationTarget: "Error",
+        translationText: `${micError} (HTTPS is required when accessing from remote devices)`,
+        metaText: "",
+      }
+    : {
+        transcriptionSource: latestTurn
+          ? `${languageName(latestTurn.sourceLang)} (Source)`
+          : "",
+        transcriptionText: drawerSourceText(latestTurn),
+        translationTarget: latestTurn
+          ? `${languageName(latestTurn.targetLang)} (Translation)`
+          : "",
+        translationText: drawerTargetText(latestTurn),
+        metaText: latestTurn?.meta ?? "",
+      }
+
   return (
     <div className="translator-envelope">
+      {/* Transcript and drawer share the envelope's first grid row; the drawer
+          overlays the transcript rather than displacing it. */}
+      <TranscriptView turns={turns} columns={columns} />
+
       <ResponseDrawer
         isActive={isDrawerOpen}
-        onClose={() => setIsDrawerOpen(false)}
-        transcriptionSource={transcriptionData.source}
-        transcriptionText={transcriptionData.text}
-        translationTarget={translationData.target}
-        translationText={translationData.text}
-        metaText={metaText}
+        onClose={closeDrawer}
+        {...drawerProps}
       />
 
       <main className="translator-workspace">
@@ -350,7 +480,7 @@ function TranslatorApp({ config }) {
               config.keyboardMode === "vertical"
                 ? "Z"
                 : activePerson === 1
-                  ? "Z"
+                  ? "SPC"
                   : null
             }
             onRotate={(dir) => handleRotateLanguage(1, dir)}
@@ -368,7 +498,7 @@ function TranslatorApp({ config }) {
               config.keyboardMode === "vertical"
                 ? "X"
                 : activePerson === 2
-                  ? "Z"
+                  ? "SPC"
                   : null
             }
             onRotate={(dir) => handleRotateLanguage(2, dir)}
@@ -379,10 +509,10 @@ function TranslatorApp({ config }) {
           {config.keyboardMode === "landscape" ? (
             <>
               <span>
-                <kbd>SPC</kbd> person
+                <kbd>⏎</kbd> person
               </span>
               <span>
-                <kbd>Z</kbd> hold talk
+                <kbd>SPC</kbd> hold talk
               </span>
               <span>
                 <kbd>←→</kbd> language

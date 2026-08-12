@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import React, { useState, useEffect } from "react"
+import React, { useState, useEffect, useRef } from "react"
 import TranslatorApp from "./TranslatorApp"
 import SettingsOverlay from "./components/SettingsOverlay"
 import { testConnectionAPI } from "./utils/api"
@@ -37,6 +37,10 @@ function App() {
   })
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+
+  // Filled in by TranslatorApp, which owns the conversation the settings
+  // overlay's "Clear conversation" button acts on.
+  const clearConversationRef = useRef(null)
 
   const testConnection = async () => {
     try {
@@ -78,7 +82,10 @@ function App() {
       </div>
 
       <div style={{ height: '100%' }}>
-        <TranslatorApp config={config} />
+        <TranslatorApp
+          config={config}
+          clearConversationRef={clearConversationRef}
+        />
       </div>
 
       <SettingsOverlay
@@ -87,6 +94,7 @@ function App() {
         config={config}
         setConfig={setConfig}
         onTestConnection={testConnection}
+        onClearConversation={() => clearConversationRef.current?.()}
       />
     </div>
   )
