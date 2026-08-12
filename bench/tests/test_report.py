@@ -108,6 +108,21 @@ class TestBuildReport(unittest.TestCase):
         })
         self.assertAlmostEqual(report["corpus_wer"], 0.1)
 
+    def test_corpus_wer_ignores_fixtures_without_reference_words(self):
+        # En fixtur vars facittext normaliseras till noll ord går inte att
+        # poängsätta: `edits` blir längden på transkriptionen och nämnaren är
+        # noll. Den får varken lyfta täljaren eller nämnaren i korpus-WER.
+        unscoreable = self._fixture(0, 0)
+        unscoreable["edits"] = 3  # word_edit_distance([], hyp) == len(hyp)
+        unscoreable["wer"] = 1.0
+        report = build_report("x", {
+            "ok-one": self._fixture(1, 10),
+            "no-reference": unscoreable,
+        })
+        self.assertAlmostEqual(report["corpus_wer"], 0.1)
+        self.assertEqual(report["corpus_edits"], 1)
+        self.assertEqual(report["corpus_ref_words"], 10)
+
     def test_corpus_wer_is_zero_when_nothing_succeeded(self):
         report = build_report("x", {"broken": self._fixture(5, 10, ok=False)})
         self.assertEqual(report["corpus_wer"], 0.0)

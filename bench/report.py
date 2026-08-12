@@ -78,8 +78,14 @@ def summarize(results, spec_text):
 
 def build_report(label, per_fixture):
     ok_fixtures = [data for data in per_fixture.values() if data["ok"]]
-    total_edits = sum(data["edits"] for data in ok_fixtures)
-    total_words = sum(data["ref_words"] for data in ok_fixtures)
+    # En fixtur utan facitord går inte att poängsätta: dess `edits` är bara
+    # längden på transkriptionen och saknar nämnare. Räknades den med skulle
+    # den lägga till fel i täljaren utan att bidra till nämnaren, och korpus-WER
+    # hade beskrivit något som inte finns. Latenssiffrorna är fortfarande giltiga,
+    # så den stannar i medianen nedan — det är bara WER den inte får styra.
+    scored = [data for data in ok_fixtures if data["ref_words"]]
+    total_edits = sum(data["edits"] for data in scored)
+    total_words = sum(data["ref_words"] for data in scored)
     overall = [data["time_to_first_audio_ms"]["median"] for data in ok_fixtures]
     return {
         "label": label,
