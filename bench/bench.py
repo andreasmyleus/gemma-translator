@@ -84,7 +84,10 @@ def main():
     parser.add_argument("--api-port", type=int, default=3100)
     parser.add_argument("--llm-port", type=int, default=9379)
     parser.add_argument("--model", default="gemma4-e2b")
-    parser.add_argument("--repeats", type=int, default=3, help="Körningar per fixtur; den första kastas")
+    # Uppmätt spridning mellan repetitioner vid 3 var för bred på en tredjedel
+    # av fixturerna. baseline.json är inspelad med 5 repetitioner, så
+    # defaultvärdet måste matcha annars jämförs körningar mot fel urval.
+    parser.add_argument("--repeats", type=int, default=5, help="Körningar per fixtur; den första kastas")
     parser.add_argument("--fixtures", help="Kommaseparerad lista med fixtur-id, default alla")
     args = parser.parse_args()
 
