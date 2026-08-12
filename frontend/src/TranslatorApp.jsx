@@ -61,6 +61,9 @@ function TranslatorApp({ config }) {
   // Currently-playing TTS audio element (chunked playback chain)
   const onlineAudioPlayerRef = useRef(null)
 
+  // Timestamps for latency measurement; reset on every key release.
+  const timingRef = useRef(null)
+
   // Language Lanes State
   const [lang1Index, setLang1Index] = useState(0)
   const [lang2Index, setLang2Index] = useState(1)
@@ -108,6 +111,20 @@ function TranslatorApp({ config }) {
         const player = new Audio(ttsUrl)
         player.volume = 1.0
         onlineAudioPlayerRef.current = player
+
+        player.onplaying = () => {
+          const marks = timingRef.current
+          if (!marks || marks.logged) return
+          marks.logged = true
+          const since = (mark) => `${(mark - marks.keyup) | 0}ms`
+          console.log(
+            `[latency] keyup→stt ${since(marks.stt)} | →llm ${since(marks.llm)} ` +
+              `| →first audio ${since(performance.now())}`,
+          )
+          setMetaText(
+            `STT ${since(marks.stt)} · LLM ${since(marks.llm)} · ljud ${since(performance.now())}`,
+          )
+        }
 
         player.onended = () => {
           chunkIndex++
@@ -178,6 +195,7 @@ function TranslatorApp({ config }) {
   )
 
   const handleRecordStop = useCallback(async () => {
+    timingRef.current = { keyup: performance.now() }
     const recordedLane = activeLaneRecording
     const audioData = await stopRecording()
     if (!audioData) return
@@ -212,6 +230,7 @@ function TranslatorApp({ config }) {
       // 1. Transcription
       setTranscriptionData((prev) => ({ ...prev, text: "Listening..." }))
       const transcribedText = await transcribeAudio(base64Data, src.code)
+      if (timingRef.current) timingRef.current.stt = performance.now()
       setTranscriptionData((prev) => ({ ...prev, text: transcribedText }))
 
       if (!transcribedText.trim()) {
@@ -228,9 +247,11 @@ function TranslatorApp({ config }) {
         modelName: config.modelName,
         systemPrompt: `You are a high-performance translator. Your task is to translate text from ${src.name.split(" ")[0]} into ${dst.name.split(" ")[0]}.\nYou MUST format your response as a valid JSON object matching this structure:\n{\n  "translation": "High-quality, natural translation into ${dst.name.split(" ")[0]}"\n}\nDo NOT return anything else except this JSON object. No Markdown block wraps (no \`\`\`json), no introductory text, no conversational text. Start directly with "{" and end directly with "}".`,
       })
+      if (timingRef.current) timingRef.current.llm = performance.now()
 
       setTranslationData((prev) => ({ ...prev, text: result.translation }))
-      setMetaText(`Duration: ${result.duration}s | Tokens: ${result.tokens}`)
+      // Tokens rapporteras inte av litert-lm (usage saknas i svaret), och
+      // latenssiffrorna sätts av playTTS när ljudet faktiskt börjar spela.
 
       if (config.enableTts) {
         playTTS(result.translation, dst.ttsLang)
