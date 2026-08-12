@@ -190,10 +190,10 @@ export default function SettingsOverlay({
                 </p>
                 <ul>
                   <li>
-                    <kbd>Space</kbd> switch active person
+                    <kbd>Enter</kbd> switch active person
                   </li>
                   <li>
-                    <kbd>Z</kbd> hold to talk, release to translate
+                    <kbd>Space</kbd> hold to talk, release to translate
                   </li>
                   <li>
                     <kbd>←</kbd> <kbd>→</kbd> change active language

@@ -246,7 +246,7 @@ function TranslatorApp({ config }) {
   }
 
   // Push-to-talk keyboard control (two modes, see README):
-  // landscape = one "active person" driven by Space/Z/arrows;
+  // landscape = one "active person" driven by Enter/Space/arrows;
   // vertical   = independent per-lane keys (Z/X for record, arrows and -/+).
   // keydown starts recording, keyup stops — e.repeat guards auto-repeat.
   useEffect(() => {
@@ -255,13 +255,13 @@ function TranslatorApp({ config }) {
       const key = e.key.toLowerCase()
 
       if (config.keyboardMode === "landscape") {
-        if (key === " " || e.key === "Spacebar") {
+        if (e.key === "Enter") {
           e.preventDefault()
           if (!isRecording) {
             playBlip("speaker")
             setActivePerson((p) => (p === 1 ? 2 : 1))
           }
-        } else if (key === "z") {
+        } else if (key === " " || e.key === "Spacebar") {
           e.preventDefault()
           if (!e.repeat && !isRecording) handleRecordStart(activePerson)
         } else if (e.key === "ArrowLeft") {
@@ -299,9 +299,9 @@ function TranslatorApp({ config }) {
       const key = e.key.toLowerCase()
 
       if (config.keyboardMode === "landscape") {
-        // Always attempt stop on Z release — the recorder hook no-ops if idle,
-        // and marks a pending stop if getUserMedia is still opening.
-        if (key === "z") handleRecordStop()
+        // Always attempt stop on Space release — the recorder hook no-ops if
+        // idle, and marks a pending stop if getUserMedia is still opening.
+        if (key === " " || e.key === "Spacebar") handleRecordStop()
       } else {
         if (key === "z" || key === "x") handleRecordStop()
       }
@@ -350,7 +350,7 @@ function TranslatorApp({ config }) {
               config.keyboardMode === "vertical"
                 ? "Z"
                 : activePerson === 1
-                  ? "Z"
+                  ? "SPC"
                   : null
             }
             onRotate={(dir) => handleRotateLanguage(1, dir)}
@@ -368,7 +368,7 @@ function TranslatorApp({ config }) {
               config.keyboardMode === "vertical"
                 ? "X"
                 : activePerson === 2
-                  ? "Z"
+                  ? "SPC"
                   : null
             }
             onRotate={(dir) => handleRotateLanguage(2, dir)}
@@ -379,10 +379,10 @@ function TranslatorApp({ config }) {
           {config.keyboardMode === "landscape" ? (
             <>
               <span>
-                <kbd>SPC</kbd> person
+                <kbd>⏎</kbd> person
               </span>
               <span>
-                <kbd>Z</kbd> hold talk
+                <kbd>SPC</kbd> hold talk
               </span>
               <span>
                 <kbd>←→</kbd> language
