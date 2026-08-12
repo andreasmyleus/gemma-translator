@@ -14,9 +14,16 @@
 
 """Syntetiserar och cachar testljud.
 
-Fixturerna görs med samma Piper-röster som produkten använder, vilket ger
-deterministiskt ljud och ett WER-facit gratis: facit är texten vi matade in.
-Filerna cachas på disk och regenereras bara när de saknas.
+Fixturerna görs med samma Piper-röster som produkten använder, vilket ger ett
+WER-facit gratis: facit är texten vi matade in. Filerna cachas på disk och
+regenereras bara när de saknas.
+
+Ljudet är deterministiskt, men bara tack vare _synthesis_config() nedan. Piper kör
+en VITS-dekoder som drar nytt brus per anrop och ONNX-grafens RandomNormal
+saknar seed, så med standardinställningarna ger samma text olika ljud varje
+gång. Det spelar roll eftersom *.wav är gitignorerad: bench/fixtures/ byggs om
+från grunden vid varje ren utcheckning, och utan determinism vore STT-tider och
+WER inte jämförbara mot resultat som mätts tidigare i kampanjen.
 """
 
 import json
@@ -34,6 +41,18 @@ FIXTURE_SPEC = BENCH_DIR / "fixtures.json"
 TARGET_SAMPLE_RATE = 16000
 # Whisper vill ha 16 kHz; Piper levererar 22,05 kHz för medium-rösterna.
 DURATION_TOLERANCE = 0.5  # ±50 % mot target_s
+
+
+def _synthesis_config():
+    """Piper-config som nollar bruset och gör syntesen reproducerbar.
+
+    noise_scale styr generatorbruset och noise_w_scale fonemlängdsbruset. Med
+    båda på 0.0 blir upprepade anrop med samma text bitidentiska (verifierat med
+    np.array_equal), vilket är hela poängen med att versionera target_s.
+    """
+    from piper.config import SynthesisConfig
+
+    return SynthesisConfig(noise_scale=0.0, noise_w_scale=0.0)
 
 
 def _import_backend():
@@ -74,7 +93,7 @@ def ensure_wav(fixture_id, spec):
 
     server = _import_backend()
     print(f"[fixtures] Syntetiserar {fixture_id} ({spec['lang']})...", flush=True)
-    samples, sample_rate = server.synthesize(spec["text"], spec["lang"])
+    samples, sample_rate = server.synthesize(spec["text"], spec["lang"], _synthesis_config())
     samples = _resample(np.asarray(samples, dtype=np.float32), sample_rate, TARGET_SAMPLE_RATE)
     pcm16 = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2")
 

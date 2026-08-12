@@ -108,13 +108,27 @@ def get_piper_voice(language):
         _piper_voices[language] = PiperVoice.load(voice_dir / f"{voice_id}.onnx")
         return _piper_voices[language]
 
-def synthesize(text, language):
-    """Synthesize `text` and return (mono float32 samples in [-1, 1], sample_rate)."""
+def synthesize(text, language, syn_config=None):
+    """Synthesize `text` and return (mono float32 samples in [-1, 1], sample_rate).
+
+    `syn_config` is an optional piper SynthesisConfig handed straight to Piper.
+    Leaving it None keeps the product's default voice settings; bench/ passes one
+    with the noise scales zeroed, because Piper's VITS decoder otherwise samples
+    fresh noise per call and no two renderings of the same text are alike.
+    """
     if language in TTS_LANG_MAP:
+        if syn_config is not None:
+            # moonshine-voice accepts no synthesis config. Refuse rather than
+            # silently ignoring it and returning non-deterministic audio.
+            raise ValueError(
+                f"syn_config is not supported for language {language!r} (moonshine-voice path)"
+            )
         return get_tts_engine(language).synthesize(text)
     if language not in PIPER_VOICE_MAP:
         language = "en"
-    chunks = list(get_piper_voice(language).synthesize(text))
+    # syn_config=None is what PiperVoice.synthesize already defaults to, so the
+    # product path stays byte-identical to before this parameter existed.
+    chunks = list(get_piper_voice(language).synthesize(text, syn_config))
     pcm = b"".join(c.audio_int16_bytes for c in chunks)
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0, chunks[0].sample_rate
 
