@@ -27,13 +27,15 @@ import {
 import { playBlip } from "./utils/audio-blip"
 
 // Core orchestrator for the two-person kiosk translator.
-// Flow: hold a key → record mic (useAudioRecorder) → POST /api/stt (Moonshine)
+// Flow: hold a key → record mic (useAudioRecorder) → POST /api/stt (Whisper)
 // → LLM translation via /proxy (Gemma, strict-JSON prompt) → /api/tts playback.
 
 // Languages offered on each lane's revolver; ttsLang selects the backend voice.
 const AVAILABLE_LANGUAGES = [
-  { code: "ar", name: "Arabic", voice: "tts", ttsLang: "ar" },
+  { code: "sv", name: "Swedish", voice: "tts", ttsLang: "sv" },
   { code: "en", name: "English", voice: "tts", ttsLang: "en" },
+  { code: "fi", name: "Finnish", voice: "tts", ttsLang: "fi" },
+  { code: "ar", name: "Arabic", voice: "tts", ttsLang: "ar" },
   { code: "es", name: "Spanish", voice: "tts", ttsLang: "es" },
   { code: "ja", name: "Japanese", voice: "tts", ttsLang: "ja" },
   { code: "zh", name: "Chinese", voice: "tts", ttsLang: "zh" },
@@ -161,25 +163,27 @@ function TranslatorApp({ config }) {
       setActiveLaneRecording(lane)
       playBlip("ping")
 
-      const ok = await startRecording()
-      if (!ok) {
+      const result = await startRecording()
+      if (result === false || result == null) {
         setActiveLaneRecording(null)
+        return
+      }
+      // startRecording may return audio directly if Z was released during mic setup.
+      if (result !== true && result.base64Data) {
+        setActiveLaneRecording(null)
+        processTranslation(lane, result.base64Data)
       }
     },
     [isRecording, stopSpeaking, startRecording],
   )
 
   const handleRecordStop = useCallback(async () => {
-    if (!isRecording) return
-
     const recordedLane = activeLaneRecording
-    setActiveLaneRecording(null)
     const audioData = await stopRecording()
-
-    if (audioData) {
-      processTranslation(recordedLane, audioData.base64Data)
-    }
-  }, [isRecording, activeLaneRecording, stopRecording])
+    if (!audioData) return
+    setActiveLaneRecording(null)
+    processTranslation(recordedLane, audioData.base64Data)
+  }, [activeLaneRecording, stopRecording])
 
   // Translation Pipeline
   const processTranslation = async (lane, base64Data) => {
@@ -295,10 +299,11 @@ function TranslatorApp({ config }) {
       const key = e.key.toLowerCase()
 
       if (config.keyboardMode === "landscape") {
-        if (key === "z" && isRecording) handleRecordStop()
+        // Always attempt stop on Z release — the recorder hook no-ops if idle,
+        // and marks a pending stop if getUserMedia is still opening.
+        if (key === "z") handleRecordStop()
       } else {
-        if (key === "z" && activeLaneRecording === 1) handleRecordStop()
-        if (key === "x" && activeLaneRecording === 2) handleRecordStop()
+        if (key === "z" || key === "x") handleRecordStop()
       }
     }
 
@@ -341,6 +346,13 @@ function TranslatorApp({ config }) {
             isActivePerson={
               config.keyboardMode === "landscape" && activePerson === 1
             }
+            recordKeyHint={
+              config.keyboardMode === "vertical"
+                ? "Z"
+                : activePerson === 1
+                  ? "Z"
+                  : null
+            }
             onRotate={(dir) => handleRotateLanguage(1, dir)}
           />
           <LanguageLane
@@ -352,8 +364,43 @@ function TranslatorApp({ config }) {
             isActivePerson={
               config.keyboardMode === "landscape" && activePerson === 2
             }
+            recordKeyHint={
+              config.keyboardMode === "vertical"
+                ? "X"
+                : activePerson === 2
+                  ? "Z"
+                  : null
+            }
             onRotate={(dir) => handleRotateLanguage(2, dir)}
           />
+        </div>
+
+        <div className="keyboard-legend" aria-live="polite">
+          {config.keyboardMode === "landscape" ? (
+            <>
+              <span>
+                <kbd>SPC</kbd> person
+              </span>
+              <span>
+                <kbd>Z</kbd> hold talk
+              </span>
+              <span>
+                <kbd>←→</kbd> language
+              </span>
+            </>
+          ) : (
+            <>
+              <span>
+                <kbd>Z</kbd>/<kbd>X</kbd> talk
+              </span>
+              <span>
+                <kbd>←→</kbd> lang 1
+              </span>
+              <span>
+                <kbd>−+</kbd> lang 2
+              </span>
+            </>
+          )}
         </div>
 
         <Visualizer

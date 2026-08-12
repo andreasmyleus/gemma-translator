@@ -181,6 +181,52 @@ export default function SettingsOverlay({
               Vertical — two-hand (Z / X / ← → / − +)
             </option>
           </select>
+          <div className="keyboard-help">
+            {config.keyboardMode === "landscape" ? (
+              <>
+                <p>
+                  <strong>Landscape</strong> — one active person (corner
+                  brackets). No on-screen record button; keys only.
+                </p>
+                <ul>
+                  <li>
+                    <kbd>Space</kbd> switch active person
+                  </li>
+                  <li>
+                    <kbd>Z</kbd> hold to talk, release to translate
+                  </li>
+                  <li>
+                    <kbd>←</kbd> <kbd>→</kbd> change active language
+                  </li>
+                </ul>
+              </>
+            ) : (
+              <>
+                <p>
+                  <strong>Vertical</strong> — each person has their own keys.
+                  No active-person highlight.
+                </p>
+                <ul>
+                  <li>
+                    <kbd>Z</kbd> person 1 talk (hold / release)
+                  </li>
+                  <li>
+                    <kbd>X</kbd> person 2 talk (hold / release)
+                  </li>
+                  <li>
+                    <kbd>←</kbd> <kbd>→</kbd> person 1 language
+                  </li>
+                  <li>
+                    <kbd>−</kbd> <kbd>+</kbd> person 2 language
+                  </li>
+                </ul>
+              </>
+            )}
+            <p className="keyboard-help-note">
+              Click the page first. Keys are ignored while a settings field is
+              focused, and language changes are locked while recording.
+            </p>
+          </div>
         </div>
 
         <div className="form-row-checkboxes">

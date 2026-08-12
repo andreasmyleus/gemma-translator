@@ -17,6 +17,33 @@
 import { useState, useRef, useCallback, useEffect } from "react"
 import { getMergedSamples, resample, blobToBase64 } from "../utils/audioHelpers"
 
+async function samplesToPayload(samples, sampleRate) {
+  const targetSampleRate = 16000 // Whisper STT expects 16 kHz mono
+  const resampledSamples = resample(samples, sampleRate, targetSampleRate)
+
+  let peak = 0
+  for (let i = 0; i < resampledSamples.length; i++) {
+    const a = Math.abs(resampledSamples[i])
+    if (a > peak) peak = a
+  }
+  console.log(
+    `[mic] ${((resampledSamples.length / targetSampleRate) * 1000) | 0}ms, peak=${peak.toFixed(3)}`,
+  )
+
+  // Slice the exact view — Float32Array.buffer may be a larger pooled buffer.
+  const rawBlob = new Blob(
+    [
+      resampledSamples.buffer.slice(
+        resampledSamples.byteOffset,
+        resampledSamples.byteOffset + resampledSamples.byteLength,
+      ),
+    ],
+    { type: "application/octet-stream" },
+  )
+  const base64Data = await blobToBase64(rawBlob)
+  return { rawBlob, base64Data }
+}
+
 // Mic capture hook: records raw Float32 PCM via Web Audio, resamples to
 // 16 kHz mono, and returns it base64-encoded — the exact payload format
 // expected by POST /api/stt (backend/server.py).
@@ -31,8 +58,14 @@ export function useAudioRecorder() {
   const analyserRef = useRef(null)
   const sourceRef = useRef(null)
   const scriptProcessorRef = useRef(null)
+  const silentGainRef = useRef(null)
   const streamRef = useRef(null)
   const recordedSamplesRef = useRef([])
+  // Refs mirror recording state so keyup can stop even if React state is stale
+  // (getUserMedia is async; Z can be released before setState flushes).
+  const isRecordingRef = useRef(false)
+  const startingRef = useRef(false)
+  const stopRequestedRef = useRef(false)
 
   useEffect(() => {
     return () => {
@@ -42,12 +75,80 @@ export function useAudioRecorder() {
     }
   }, [])
 
+  const teardownGraph = useCallback(() => {
+    if (scriptProcessorRef.current) {
+      scriptProcessorRef.current.disconnect()
+      scriptProcessorRef.current.onaudioprocess = null
+      scriptProcessorRef.current = null
+    }
+    if (silentGainRef.current) {
+      silentGainRef.current.disconnect()
+      silentGainRef.current = null
+    }
+    if (sourceRef.current) {
+      sourceRef.current.disconnect()
+      sourceRef.current = null
+    }
+    if (analyserRef.current) {
+      analyserRef.current.disconnect()
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
+    }
+  }, [])
+
+  const finalizeRecording = useCallback(async () => {
+    isRecordingRef.current = false
+    startingRef.current = false
+    setIsRecording(false)
+
+    const actualSampleRate = audioContextRef.current?.sampleRate || 16000
+    teardownGraph()
+
+    if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+      await audioContextRef.current.close()
+      audioContextRef.current = null
+    }
+
+    if (recordedSamplesRef.current.length === 0) {
+      console.warn("No audio samples recorded")
+      return null
+    }
+
+    const mergedSamples = getMergedSamples(recordedSamplesRef.current)
+    recordedSamplesRef.current = []
+    try {
+      return await samplesToPayload(mergedSamples, actualSampleRate)
+    } catch (err) {
+      console.error("Base64 encoding failed:", err)
+      return null
+    }
+  }, [teardownGraph])
+
   const startRecording = useCallback(async () => {
+    if (isRecordingRef.current || startingRef.current) return false
+    startingRef.current = true
+    stopRequestedRef.current = false
     setMicError(null)
     try {
+      // Disable echoCancellation: ScriptProcessor must stay in the audio graph
+      // (via a silent gain→destination) to keep callbacks firing, and AEC would
+      // treat that loop as echo and zero out the mic.
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
       })
+
+      if (stopRequestedRef.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        startingRef.current = false
+        return false
+      }
 
       streamRef.current = stream
 
@@ -64,7 +165,11 @@ export function useAudioRecorder() {
       analyserRef.current.fftSize = 256
       source.connect(analyserRef.current)
 
-      const scriptProcessor = audioContextRef.current.createScriptProcessor(4096, 1, 1)
+      const scriptProcessor = audioContextRef.current.createScriptProcessor(
+        4096,
+        1,
+        1,
+      )
       scriptProcessorRef.current = scriptProcessor
       recordedSamplesRef.current = []
 
@@ -73,70 +178,47 @@ export function useAudioRecorder() {
         recordedSamplesRef.current.push(new Float32Array(inputData))
       }
 
+      // Keep the processor alive without playing mic through the speakers
+      // (playback would trigger AEC and wipe the capture).
+      const silentGain = audioContextRef.current.createGain()
+      silentGain.gain.value = 0
+      silentGainRef.current = silentGain
       source.connect(scriptProcessor)
-      scriptProcessor.connect(audioContextRef.current.destination)
+      scriptProcessor.connect(silentGain)
+      silentGain.connect(audioContextRef.current.destination)
 
+      isRecordingRef.current = true
+      startingRef.current = false
       setIsRecording(true)
+
+      // Key released while mic was still opening — finalize whatever we got.
+      if (stopRequestedRef.current) {
+        return await finalizeRecording()
+      }
       return true
     } catch (err) {
       console.error("Error accessing microphone:", err)
-      const msg = err.message || "Microphone access failed (HTTPS required for remote devices)"
+      const msg =
+        err.message ||
+        "Microphone access failed (HTTPS required for remote devices)"
       setMicError(msg)
+      startingRef.current = false
+      isRecordingRef.current = false
+      setIsRecording(false)
       return false
     }
-  }, [])
+  }, [finalizeRecording])
 
   const stopRecording = useCallback(async () => {
-    if (!isRecording) return
-
-    setIsRecording(false)
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop())
-    }
-
-    if (scriptProcessorRef.current) {
-      scriptProcessorRef.current.disconnect()
-      scriptProcessorRef.current.onaudioprocess = null
-      scriptProcessorRef.current = null
-    }
-    if (sourceRef.current) {
-      sourceRef.current.disconnect()
-      sourceRef.current = null
-    }
-    if (analyserRef.current) {
-      analyserRef.current.disconnect()
-    }
-
-    const actualSampleRate = audioContextRef.current?.sampleRate || 16000
-    if (audioContextRef.current && audioContextRef.current.state !== "closed") {
-      await audioContextRef.current.close()
-    }
-
-    if (recordedSamplesRef.current.length === 0) {
-      console.warn("No audio samples recorded")
+    // If getUserMedia is still pending, mark stop so startRecording aborts
+    // or finalizes as soon as the graph is up.
+    if (startingRef.current) {
+      stopRequestedRef.current = true
       return null
     }
-
-    const mergedSamples = getMergedSamples(recordedSamplesRef.current)
-    recordedSamplesRef.current = []
-    const targetSampleRate = 16000 // Moonshine STT expects 16 kHz mono
-    const resampledSamples = resample(
-      mergedSamples,
-      actualSampleRate,
-      targetSampleRate,
-    )
-    const rawBlob = new Blob([resampledSamples.buffer], {
-      type: "application/octet-stream",
-    })
-
-    try {
-      const base64Data = await blobToBase64(rawBlob)
-      return { rawBlob, base64Data }
-    } catch (err) {
-      console.error("Base64 encoding failed:", err)
-      return null
-    }
-  }, [isRecording])
+    if (!isRecordingRef.current) return null
+    return finalizeRecording()
+  }, [finalizeRecording])
 
   return {
     isRecording,

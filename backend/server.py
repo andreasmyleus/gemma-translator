@@ -30,75 +30,111 @@ import ssl
 import threading
 from collections import OrderedDict
 
-# Multilingual STT via Moonshine.
-# Language is fixed at recognizer construction, so we lazily build (and cache) one
-# recognizer per language actually used.
+# Multilingual STT via faster-whisper. One model covers every language, so unlike the
+# per-language engines below there is nothing to cache or evict.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SUPPORTED_STT_LANGS = {"en", "ar", "es", "ja", "zh", "ko"}
+# UI language codes we hand to Whisper directly; anything else gets auto-detected.
+# Any Whisper checkpoint works here, including Swedish-tuned ones (e.g. KBLab/kb-whisper-medium).
+SUPPORTED_STT_LANGS = {"sv", "fi", "en", "ar", "es", "ja", "zh", "ko"}
+WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small")
 MAX_MODELS = 2
-_stt_recognizers = OrderedDict()  # language -> recognizer
-# RLock (reentrant): handle_stt holds the lock across get_stt_recognizer() + inference,
-# and get_stt_recognizer() re-acquires it on the same thread. A plain Lock() self-deadlocks.
+# Loaded at startup so the two default lanes never stall on a first utterance.
+# Keep this within MAX_MODELS or the entries just evict each other.
+PREWARM_LANGS = ("sv", "en")
+_whisper_model = None
+# RLock (reentrant): handle_stt holds the lock across get_whisper_model() + inference,
+# and get_whisper_model() re-acquires it on the same thread. A plain Lock() self-deadlocks.
 _stt_lock = threading.RLock()
 
-# Multilingual TTS via moonshine-voice (Kokoro / Piper backed). Language is fixed at
-# TextToSpeech construction, so we lazily build (and cache) one engine per language used.
-# Maps our UI language codes -> moonshine-voice language codes.
+# Multilingual TTS via Piper, which is the only offline engine covering both Swedish and
+# Finnish. The voice is fixed at load, so we lazily build (and cache) one per language used.
+PIPER_VOICE_MAP = {
+    "sv": "sv_SE-nst-medium",
+    "fi": "fi_FI-harri-medium",
+    "en": "en_US-lessac-medium",
+    "ar": "ar_JO-kareem-medium",
+    "es": "es_ES-davefx-medium",
+    "zh": "zh_CN-huayan-medium",
+    "ko": "ko_KR-kss-medium",
+}
+# Piper has no Japanese voice, so `ja` alone still goes through moonshine-voice
+# (Kokoro / Piper backed). Maps our UI language codes -> moonshine-voice language codes.
 TTS_LANG_MAP = {
-    "ar": "ar-msa",
-    "en": "en-us",
-    "es": "es-es",
     "ja": "ja-jp",
-    "zh": "zh-hans",
-    "ko": "ko-kr",
 }
-# Optional per-language voice override (moonshine-voice voice IDs). Languages not
-# listed here use moonshine's default voice for that language.
-TTS_VOICE_MAP = {
-    "zh": "kokoro_zf_xiaoxiao",  # 晓晓 — soft, gentle female Mandarin
-}
+PIPER_VOICE_DIR = os.environ.get(
+    "PIPER_VOICE_DIR", os.path.join(os.path.expanduser("~"), ".local", "share", "piper-voices")
+)
+_piper_voices = OrderedDict()  # our-lang-code -> PiperVoice
 _tts_engines = OrderedDict()  # our-lang-code -> TextToSpeech
-# RLock (reentrant): handle_tts holds the lock across get_tts_engine() + synthesis,
-# and get_tts_engine() re-acquires it on the same thread. A plain Lock() self-deadlocks.
+# RLock (reentrant): handle_tts holds the lock across the loaders + synthesis, and the
+# loaders re-acquire it on the same thread. A plain Lock() self-deadlocks.
 _tts_lock = threading.RLock()
 
-def get_tts_engine(language="en"):
-    if language not in TTS_LANG_MAP:
-        language = "en"
+def get_tts_engine(language):
     with _tts_lock:
         if language in _tts_engines:
             _tts_engines.move_to_end(language)
             return _tts_engines[language]
         from moonshine_voice import TextToSpeech
         moon_lang = TTS_LANG_MAP[language]
-        voice = TTS_VOICE_MAP.get(language)
-        print(f"[TTS] Loading moonshine-voice (lang={language} -> {moon_lang}, voice={voice or 'default'})...")
+        print(f"[TTS] Loading moonshine-voice (lang={language} -> {moon_lang})...")
         if len(_tts_engines) >= MAX_MODELS:
             oldest_lang, oldest_engine = _tts_engines.popitem(last=False)
             print(f"[TTS] Evicting model for {oldest_lang}")
             del oldest_engine
-        if voice:
-            _tts_engines[language] = TextToSpeech(moon_lang, voice=voice)
-        else:
-            _tts_engines[language] = TextToSpeech(moon_lang)
+        _tts_engines[language] = TextToSpeech(moon_lang)
         return _tts_engines[language]
 
-def get_stt_recognizer(language="en"):
-    if language not in SUPPORTED_STT_LANGS:
+def get_piper_voice(language):
+    with _tts_lock:
+        if language in _piper_voices:
+            _piper_voices.move_to_end(language)
+            return _piper_voices[language]
+        from pathlib import Path
+        from piper import PiperVoice
+        from piper.download_voices import download_voice
+        voice_id = PIPER_VOICE_MAP[language]
+        voice_dir = Path(PIPER_VOICE_DIR)
+        voice_dir.mkdir(parents=True, exist_ok=True)
+        if not (voice_dir / f"{voice_id}.onnx").exists():
+            print(f"[TTS] Downloading Piper voice {voice_id}...")
+            download_voice(voice_id, voice_dir)
+        print(f"[TTS] Loading Piper (lang={language} -> {voice_id})...")
+        if len(_piper_voices) >= MAX_MODELS:
+            oldest_lang, oldest_voice = _piper_voices.popitem(last=False)
+            print(f"[TTS] Evicting Piper voice for {oldest_lang}")
+            del oldest_voice
+        _piper_voices[language] = PiperVoice.load(voice_dir / f"{voice_id}.onnx")
+        return _piper_voices[language]
+
+def synthesize(text, language):
+    """Synthesize `text` and return (mono float32 samples in [-1, 1], sample_rate)."""
+    if language in TTS_LANG_MAP:
+        return get_tts_engine(language).synthesize(text)
+    if language not in PIPER_VOICE_MAP:
         language = "en"
+    chunks = list(get_piper_voice(language).synthesize(text))
+    pcm = b"".join(c.audio_int16_bytes for c in chunks)
+    return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0, chunks[0].sample_rate
+
+def get_whisper_model():
+    global _whisper_model
     with _stt_lock:
-        if language in _stt_recognizers:
-            _stt_recognizers.move_to_end(language)
-            return _stt_recognizers[language]
-        from moonshine_voice import get_model_for_language, Transcriber
-        print(f"[STT] Loading Moonshine STT (lang={language})...")
-        if len(_stt_recognizers) >= MAX_MODELS:
-            oldest_lang, oldest_recognizer = _stt_recognizers.popitem(last=False)
-            print(f"[STT] Evicting model for {oldest_lang}")
-            del oldest_recognizer
-        model_path, model_arch = get_model_for_language(language)
-        _stt_recognizers[language] = Transcriber(model_path=model_path, model_arch=model_arch)
-        return _stt_recognizers[language]
+        if _whisper_model is None:
+            from faster_whisper import WhisperModel
+            print(f"[STT] Loading faster-whisper ({WHISPER_MODEL_SIZE}, int8)...")
+            _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+        return _whisper_model
+
+def transcribe(audio_np, language):
+    """Transcribe 16 kHz mono float32 samples. Unknown languages are auto-detected."""
+    segments, _ = get_whisper_model().transcribe(
+        audio_np,
+        language=language if language in SUPPORTED_STT_LANGS else None,
+        beam_size=1,
+    )
+    return " ".join(s.text.strip() for s in segments)
 
 
 PORT = 3000
@@ -192,14 +228,13 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b'Error: Missing "text" parameter.')
             return
 
-        print(f"[TTS] Synthesizing with moonshine-voice: {text[:50]}... (lang: {lang})")
+        print(f"[TTS] Synthesizing: {text[:50]}... (lang: {lang})")
 
         try:
             with _tts_lock:
-                engine = get_tts_engine(lang)
-                audio, sample_rate = engine.synthesize(text)
+                audio, sample_rate = synthesize(text, lang)
 
-            # moonshine-voice returns mono float samples in [-1, 1]; encode to 16-bit PCM WAV.
+            # Both engines return mono float samples in [-1, 1]; encode to 16-bit PCM WAV.
             samples = np.asarray(audio, dtype=np.float32)
             samples = np.clip(samples, -1.0, 1.0)
             pcm16 = (samples * 32767.0).astype('<i2')
@@ -239,15 +274,20 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
             language = data.get('language', 'en')
             raw_data = base64.b64decode(audio_b64)
-            
-            # The browser sends a raw Float32Array buffer
-            audio_np = np.frombuffer(raw_data, dtype=np.float32)
+
+            # The browser sends a raw Float32Array buffer (16 kHz mono).
+            audio_np = np.frombuffer(raw_data, dtype=np.float32).copy()
+            duration_s = len(audio_np) / 16000.0
+            peak = float(np.max(np.abs(audio_np))) if len(audio_np) else 0.0
+            rms = float(np.sqrt(np.mean(audio_np ** 2))) if len(audio_np) else 0.0
+            print(
+                f"[STT] audio: {duration_s:.2f}s, peak={peak:.4f}, rms={rms:.4f}, lang={language}",
+                flush=True,
+            )
 
             with _stt_lock:
-                recognizer = get_stt_recognizer(language)
-                transcript = recognizer.transcribe_without_streaming(audio_np, 16000)
-            text = " ".join([line.text for line in transcript.lines])
-            print(f"[STT] Transcribed: {text}")
+                text = transcribe(audio_np, language)
+            print(f"[STT] Transcribed: {text!r}", flush=True)
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -494,9 +534,13 @@ if __name__ == '__main__':
         print(f"===========================================================")
         def _prewarm_models():
             try:
-                print("[Prewarm] Loading default English STT & TTS models into memory...", flush=True)
-                get_stt_recognizer("en")
-                get_tts_engine("en")
+                get_whisper_model()
+                for lang in PREWARM_LANGS:
+                    print(f"[Prewarm] Loading {lang} voice into memory...", flush=True)
+                    if lang in TTS_LANG_MAP:
+                        get_tts_engine(lang)
+                    else:
+                        get_piper_voice(lang)
                 print("[Prewarm] Models pre-warmed successfully.", flush=True)
             except Exception as e:
                 print(f"[Prewarm Error] {e}", flush=True)

@@ -26,6 +26,7 @@ export default function LanguageLane({
   currentIndex,
   isRecording,
   isActivePerson,
+  recordKeyHint,
   onRotate,
 }) {
   const drumRef = useRef(null)
@@ -55,6 +56,11 @@ export default function LanguageLane({
     >
       <div className="lane-header">
         <span className="lane-label">{laneLabel}</span>
+        {recordKeyHint ? (
+          <span className="key-hint" title="Hold to talk, release to translate">
+            {recordKeyHint}
+          </span>
+        ) : null}
       </div>
       <div className="revolver-stage">
         <button
