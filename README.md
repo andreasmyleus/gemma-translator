@@ -89,6 +89,27 @@ The backend pre-warms the models for both default lanes at startup, so the first
 
 Piper covers 54 languages but has no Japanese voice, which is the one case still routed to moonshine-voice via `TTS_LANG_MAP`. Any other language Piper lacks needs the same treatment, or a different engine.
 
+## Benchmarking
+
+`bench/` measures the full push-to-talk chain over HTTP and gates on quality
+regression. It synthesizes its own fixtures with Piper, so no recordings are
+needed:
+
+```bash
+# Requires litert-lm already running on :9379 (./start.sh)
+venv/bin/python3 -m bench.bench --label baseline
+venv/bin/python3 -m bench.bench --label my-change --compare baseline
+```
+
+Each run starts its own backend on port 3100, warms the models, and reports
+median time-to-first-audio per fixture alongside word error rate. A run exits
+non-zero if *corpus* WER — total word errors over total reference words across
+all fixtures — rises more than 2 points against the comparison run. Per-fixture
+WER is reported too but doesn't gate: with 3-33 word references, one changed
+word moves a single fixture's WER by 3 to 33 points, so a per-fixture threshold
+would be zero tolerance wearing a percentage sign. Results are committed to
+`bench/results/` as a history of the optimization campaign.
+
 ## Latency notes & ideas
 
 A typical push-to-talk round trip is ~7s today. Rough split on this Mac (CPU, Whisper `small` int8):
