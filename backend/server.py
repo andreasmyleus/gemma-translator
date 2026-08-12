@@ -137,7 +137,9 @@ def transcribe(audio_np, language):
     return " ".join(s.text.strip() for s in segments)
 
 
-PORT = 3000
+# Överskrivbar så att bench/ kan köra en egen instans parallellt med en
+# vanlig utvecklingsserver på 3000.
+PORT = int(os.environ.get("PORT", 3000))
 
 class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     def end_headers(self):
