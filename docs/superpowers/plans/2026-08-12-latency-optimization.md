@@ -900,14 +900,33 @@ git commit -m "Add bench runner that times each stage over the real HTTP path"
 - Create: `bench/tests/test_report.py`
 
 **Interfaces:**
-- Consumes: `bench.runner.RunResult`, `bench.wer.wer`
+- Consumes: `bench.runner.RunResult`, `bench.wer.{wer, normalize, word_edit_distance}`
 - Produces:
   - `METRICS: tuple[str, ...]` — `("stt_ms", "llm_ms", "tts_first_ms", "tts_rest_ms", "time_to_first_audio_ms", "wall_total_ms")`
   - `median(values: list[float]) -> float`
-  - `summarize(results: list[RunResult], spec_text: str) -> dict` — per fixtur: median/min/max per mätpunkt, plus `wer`, `translation`, `ok`
-  - `build_report(label: str, per_fixture: dict) -> dict` — hela JSON-strukturen som skrivs till disk
+  - `summarize(results: list[RunResult], spec_text: str) -> dict` — per fixtur: median/min/max per mätpunkt, plus `wer`, `edits`, `ref_words`, `translation`, `ok`
+  - `build_report(label: str, per_fixture: dict) -> dict` — hela JSON-strukturen som skrivs till disk, inklusive `corpus_wer`
   - `render_markdown(current: dict, baseline: dict | None) -> str`
   - `gate(current: dict, baseline: dict | None, wer_threshold: float = 0.02) -> tuple[bool, list[str]]`
+
+### Grinden mäter korpus-WER, inte per fixtur
+
+Planen sa ursprungligen att grinden skulle fälla när en enskild fixturs WER
+steg mer än 2 procentenheter. Det visade sig vara omöjligt att uppfylla:
+WER kvantiseras i steg om `1 / antal ord i facit`, och de nio fixturerna har
+3–33 ord. Minsta möjliga förändring är alltså 0,030 i bästa fall och 0,333
+för treordsfixturerna — varenda ett större än tröskeln 0,02. En per-fixtur-grind
+hade i praktiken varit nolltolerans med en missvisande etikett.
+
+Grinden räknar därför **korpus-WER**: summan av alla ordfel delat med summan
+av alla facitord över samtliga fixturer. Med 121 ord totalt motsvarar ett
+enda ändrat ord 0,8 procentenheter, vilket gör 2-procentströskeln till en
+verklig tolerans på ungefär två ord i hela sviten. Det är också så WER
+konventionellt beräknas över ett testkorpus: långa yttranden ska väga tyngre
+än korta.
+
+Per-fixtur-WER står kvar i tabellen, eftersom det är där man ser *vilken*
+fixtur som försämrades. Det styr bara inte utfallet.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -916,11 +935,18 @@ Skapa `bench/tests/test_report.py`:
 ```python
 import unittest
 
-from bench.report import gate, median, summarize
+from bench.report import build_report, gate, median, summarize
 from bench.runner import RunResult
 
 
-def make_result(fixture_id="sv-short", stt=100.0, llm=1000.0, tts=50.0, transcript="var ligger stationen", translation="Where is the station?"):
+def make_result(
+    fixture_id="sv-short",
+    stt=100.0,
+    llm=1000.0,
+    tts=50.0,
+    transcript="var ligger stationen",
+    translation="Where is the station?",
+):
     return RunResult(
         fixture_id=fixture_id,
         stt_ms=stt,
@@ -940,6 +966,9 @@ class TestMedian(unittest.TestCase):
     def test_even_count_averages_middle_pair(self):
         self.assertEqual(median([1.0, 2.0, 3.0, 4.0]), 2.5)
 
+    def test_empty_is_zero(self):
+        self.assertEqual(median([]), 0.0)
+
 
 class TestSummarize(unittest.TestCase):
     def test_reports_median_and_spread(self):
@@ -957,6 +986,13 @@ class TestSummarize(unittest.TestCase):
         summary = summarize([make_result(transcript="var ligger stationen")], "Var ligger stationen?")
         self.assertEqual(summary["wer"], 0.0)
 
+    def test_reports_raw_counts_for_corpus_aggregation(self):
+        # Korpus-WER kan inte räknas ur per-fixtur-WER i efterhand; den behöver
+        # täljare och nämnare var för sig.
+        summary = summarize([make_result(transcript="vad ligger stationen")], "Var ligger stationen?")
+        self.assertEqual(summary["edits"], 1)
+        self.assertEqual(summary["ref_words"], 3)
+
     def test_failed_run_marks_fixture_not_ok(self):
         failed = make_result()
         failed.ok = False
@@ -965,17 +1001,51 @@ class TestSummarize(unittest.TestCase):
         self.assertFalse(summary["ok"])
 
 
-class TestGate(unittest.TestCase):
-    def _report(self, wer_value, translation="Where is the station?", ok=True):
+class TestBuildReport(unittest.TestCase):
+    def _fixture(self, edits, ref_words, ok=True):
         return {
+            "ok": ok,
+            "errors": [],
+            "edits": edits,
+            "ref_words": ref_words,
+            "wer": edits / ref_words if ref_words else 0.0,
+            "translation": "x",
+            "time_to_first_audio_ms": {"median": 1000.0, "min": 1000.0, "max": 1000.0},
+        }
+
+    def test_corpus_wer_weights_by_word_count_not_by_fixture(self):
+        # Ett fel i en treordsfixtur och noll fel i en trettioordsfixtur:
+        # korpus-WER är 1/33, inte medelvärdet av 0.333 och 0.0.
+        report = build_report("x", {
+            "short": self._fixture(1, 3),
+            "long": self._fixture(0, 30),
+        })
+        self.assertAlmostEqual(report["corpus_wer"], 1 / 33)
+
+    def test_corpus_wer_ignores_failed_fixtures(self):
+        report = build_report("x", {
+            "ok-one": self._fixture(1, 10),
+            "broken": self._fixture(9, 10, ok=False),
+        })
+        self.assertAlmostEqual(report["corpus_wer"], 0.1)
+
+    def test_corpus_wer_is_zero_when_nothing_succeeded(self):
+        report = build_report("x", {"broken": self._fixture(5, 10, ok=False)})
+        self.assertEqual(report["corpus_wer"], 0.0)
+
+
+class TestGate(unittest.TestCase):
+    def _report(self, corpus_wer, translation="Where is the station?", ok=True):
+        return {
+            "corpus_wer": corpus_wer,
             "fixtures": {
                 "sv-short": {
-                    "wer": wer_value,
+                    "wer": corpus_wer,
                     "translation": translation,
                     "ok": ok,
                     "errors": [] if ok else ["ValueError: boom"],
                 }
-            }
+            },
         }
 
     def test_passes_without_baseline(self):
@@ -983,20 +1053,20 @@ class TestGate(unittest.TestCase):
         self.assertTrue(passed)
         self.assertEqual(messages, [])
 
-    def test_passes_when_wer_unchanged(self):
+    def test_passes_when_corpus_wer_unchanged(self):
         passed, _ = gate(self._report(0.10), self._report(0.10))
         self.assertTrue(passed)
 
-    def test_passes_when_wer_rises_within_threshold(self):
+    def test_passes_when_corpus_wer_rises_within_threshold(self):
         passed, _ = gate(self._report(0.115), self._report(0.10))
         self.assertTrue(passed)
 
-    def test_fails_when_wer_rises_beyond_threshold(self):
+    def test_fails_when_corpus_wer_rises_beyond_threshold(self):
         passed, messages = gate(self._report(0.13), self._report(0.10))
         self.assertFalse(passed)
-        self.assertIn("sv-short", messages[0])
+        self.assertTrue(any("REGRESSION" in message for message in messages))
 
-    def test_improved_wer_never_fails(self):
+    def test_improved_corpus_wer_never_fails(self):
         passed, _ = gate(self._report(0.01), self._report(0.30))
         self.assertTrue(passed)
 
@@ -1012,6 +1082,15 @@ class TestGate(unittest.TestCase):
         passed, messages = gate(self._report(0.0, ok=False), None)
         self.assertFalse(passed)
         self.assertIn("sv-short", messages[0])
+
+    def test_baseline_without_corpus_wer_skips_the_wer_gate(self):
+        # Äldre resultatfiler saknar fältet; grinden ska säga det rakt ut
+        # i stället för att tyst låtsas att kvaliteten hölls.
+        legacy = self._report(0.10)
+        del legacy["corpus_wer"]
+        passed, messages = gate(self._report(0.90), legacy)
+        self.assertTrue(passed)
+        self.assertTrue(any("corpus_wer" in message for message in messages))
 
 
 if __name__ == "__main__":
@@ -1030,7 +1109,7 @@ Skapa `bench/report.py` med Apache-huvudet, sedan:
 ```python
 """Sammanfattar körningar, jämför mot baseline och fäller på regression."""
 
-from bench.wer import wer as compute_wer
+from bench.wer import normalize, word_edit_distance
 
 METRICS = (
     "stt_ms",
@@ -1041,8 +1120,9 @@ METRICS = (
     "wall_total_ms",
 )
 
-# Absolut ökning i WER som får passera. Rymmer normal variation mellan
-# körningar utan att släppa igenom en verklig försämring.
+# Absolut ökning i korpus-WER som får passera. Med ~121 facitord i sviten
+# motsvarar ett enda ändrat ord ca 0,008, så tröskeln rymmer ungefär två
+# ords variation innan den fäller.
 DEFAULT_WER_THRESHOLD = 0.02
 
 
@@ -1058,7 +1138,18 @@ def median(values):
 
 
 def summarize(results, spec_text):
-    """Slår ihop repetitionerna för en fixtur till en rad."""
+    """Slår ihop repetitionerna för en fixtur till en rad.
+
+    Både `wer` och råtalen `edits`/`ref_words` sparas: per-fixtur-WER visas i
+    tabellen, medan korpus-WER måste summeras ur täljare och nämnare var för
+    sig — ett medelvärde av per-fixtur-WER hade gett treordsfixturerna lika
+    stor vikt som trettioordsfixturerna.
+    """
+    reference = normalize(spec_text)
+    hypothesis = normalize(results[-1].transcript)
+    edits = word_edit_distance(reference, hypothesis)
+    ref_words = len(reference)
+
     summary = {
         "ok": all(result.ok for result in results),
         "errors": [result.error for result in results if not result.ok],
@@ -1066,7 +1157,9 @@ def summarize(results, spec_text):
         "transcript": results[-1].transcript,
         "chunk_count": results[-1].chunk_count,
         "upload_bytes": results[-1].upload_bytes,
-        "wer": compute_wer(spec_text, results[-1].transcript),
+        "edits": edits,
+        "ref_words": ref_words,
+        "wer": (edits / ref_words) if ref_words else (0.0 if not hypothesis else 1.0),
     }
     for metric in METRICS:
         values = [getattr(result, metric) for result in results]
@@ -1079,15 +1172,17 @@ def summarize(results, spec_text):
 
 
 def build_report(label, per_fixture):
-    overall = [
-        data["time_to_first_audio_ms"]["median"]
-        for data in per_fixture.values()
-        if data["ok"]
-    ]
+    ok_fixtures = [data for data in per_fixture.values() if data["ok"]]
+    total_edits = sum(data["edits"] for data in ok_fixtures)
+    total_words = sum(data["ref_words"] for data in ok_fixtures)
+    overall = [data["time_to_first_audio_ms"]["median"] for data in ok_fixtures]
     return {
         "label": label,
         "fixtures": per_fixture,
         "median_time_to_first_audio_ms": median(overall),
+        "corpus_wer": (total_edits / total_words) if total_words else 0.0,
+        "corpus_edits": total_edits,
+        "corpus_ref_words": total_words,
     }
 
 
@@ -1128,15 +1223,19 @@ def render_markdown(current, baseline=None):
     lines.append(
         f"**Median till första ljud: {overall:.0f} ms** {_delta(overall, baseline_overall)}"
     )
+    lines.append(
+        f"**Korpus-WER: {current['corpus_wer']:.3f}** "
+        f"({current['corpus_edits']} fel på {current['corpus_ref_words']} ord)"
+    )
     return "\n".join(lines)
 
 
 def gate(current, baseline=None, wer_threshold=DEFAULT_WER_THRESHOLD):
     """Returnerar (passerade, meddelanden).
 
-    Fäller på misslyckade fixturer och på WER som stigit mer än tröskeln.
-    Ändrad översättning noteras men fäller inte — Gemma får formulera om sig
-    så länge transkriptionen håller.
+    Fäller på misslyckade fixturer och på korpus-WER som stigit mer än
+    tröskeln. Ändrad översättning noteras men fäller inte — Gemma får
+    formulera om sig så länge transkriptionen håller.
     """
     messages = []
     passed = True
@@ -1149,17 +1248,31 @@ def gate(current, baseline=None, wer_threshold=DEFAULT_WER_THRESHOLD):
     if not baseline:
         return passed, messages
 
+    if "corpus_wer" not in baseline:
+        messages.append(
+            "VARNING: jämförelsekörningen saknar corpus_wer — WER-grinden hoppades över."
+        )
+    else:
+        rise = current["corpus_wer"] - baseline["corpus_wer"]
+        if rise > wer_threshold:
+            passed = False
+            worse = [
+                f"{fixture_id} {baseline['fixtures'][fixture_id]['wer']:.2f}→{data['wer']:.2f}"
+                for fixture_id, data in current["fixtures"].items()
+                if data["ok"]
+                and fixture_id in baseline["fixtures"]
+                and data["wer"] > baseline["fixtures"][fixture_id]["wer"]
+            ]
+            messages.append(
+                f"REGRESSION korpus-WER {baseline['corpus_wer']:.3f} → "
+                f"{current['corpus_wer']:.3f} (+{rise:.3f}, tröskel {wer_threshold:.3f}). "
+                f"Försämrade fixturer: {', '.join(worse) or 'inga enskilda'}"
+            )
+
     for fixture_id, data in current["fixtures"].items():
         reference = baseline["fixtures"].get(fixture_id)
         if not reference or not data["ok"]:
             continue
-        rise = data["wer"] - reference["wer"]
-        if rise > wer_threshold:
-            passed = False
-            messages.append(
-                f"REGRESSION {fixture_id}: WER {reference['wer']:.2f} → {data['wer']:.2f} "
-                f"(+{rise:.2f}, tröskel {wer_threshold:.2f})"
-            )
         if data["translation"] != reference["translation"]:
             messages.append(
                 f"NOTERA {fixture_id}: översättning ändrad\n"
@@ -1173,16 +1286,15 @@ def gate(current, baseline=None, wer_threshold=DEFAULT_WER_THRESHOLD):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `venv/bin/python3 -m unittest discover -s bench/tests -t . -v`
-Expected: PASS, 39 tester totalt
+Expected: PASS, alla tester gröna
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add bench/report.py bench/tests/test_report.py
-git commit -m "Add bench reporting with median aggregation and WER regression gate"
+git commit -m "Add bench reporting with corpus-level WER regression gate"
 ```
 
----
 
 ## Task 6: `bench/bench.py` och baseline-körningen
 
@@ -1435,8 +1547,12 @@ venv/bin/python3 -m bench.bench --label my-change --compare baseline
 
 Each run starts its own backend on port 3100, warms the models, and reports
 median time-to-first-audio per fixture alongside word error rate. A run exits
-non-zero if WER rises more than 2 points against the comparison run. Results
-are committed to `bench/results/` as a history of the optimization campaign.
+non-zero if *corpus* WER — total word errors over total reference words across
+all fixtures — rises more than 2 points against the comparison run. Per-fixture
+WER is reported too but doesn't gate: with 3-33 word references, one changed
+word moves a single fixture's WER by 3 to 33 points, so a per-fixture threshold
+would be zero tolerance wearing a percentage sign. Results are committed to
+`bench/results/` as a history of the optimization campaign.
 ```
 
 - [ ] **Step 9: Commit**

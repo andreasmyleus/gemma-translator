@@ -142,14 +142,25 @@ av resten rapporteras, tillsammans med min/max så vi ser spridningen.
 Utfall (bara när `--compare` angetts; utan den rapporteras WER som ren siffra
 och ingen grind körs):
 
-- WER stiger mer än 2 procentenheter absolut mot jämförelsekörningen → rött,
-  exit nonzero.
+- **Korpus-WER** stiger mer än 2 procentenheter absolut mot
+  jämförelsekörningen → rött, exit nonzero.
 - Översättningen skiljer sig från jämförelsekörningen → gult, flaggas för
   manuell granskning men fäller inte körningen.
 
-Två procentenheter är vald som tröskel för att rymma normal variation mellan
-körningar utan att släppa igenom en verklig försämring; den justeras om
-baseline visar sig brusigare än så.
+**Grinden mäter korpus, inte enskilda fixturer.** Ursprungsversionen av den
+här specen fällde per fixtur, vilket vid genomförandet visade sig vara
+omöjligt att uppfylla: WER kvantiseras i steg om `1 / antal ord i facit`, och
+fixturerna har 3–33 ord. Minsta möjliga förändring är därför 0,030 i bästa
+fall och 0,333 för treordsfixturerna — alla större än tröskeln. En
+per-fixtur-grind hade varit nolltolerans med en missvisande etikett.
+
+Korpus-WER är summan av alla ordfel delat med summan av alla facitord över
+samtliga fixturer. Med 121 ord totalt motsvarar ett enda ändrat ord 0,8
+procentenheter, vilket gör 2-procentströskeln till en verklig tolerans på
+ungefär två ord i hela sviten. Det är också konventionen för WER över ett
+testkorpus: långa yttranden väger tyngre än korta. Per-fixtur-WER står kvar i
+tabellen, eftersom det är där man ser vilken fixtur som försämrades — det
+styr bara inte utfallet.
 
 #### Utdata
 
