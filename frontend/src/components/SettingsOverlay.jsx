@@ -17,14 +17,16 @@
 import React from "react"
 
 // Fullscreen developer settings: theme color, LLM endpoint/model/key,
-// keyboard mode, TTS toggle, visualizer density, and system volume
-// (proxied to amixer on the Pi via the backend's /api/volume).
+// keyboard mode, TTS toggle, visualizer density, system volume
+// (proxied to amixer on the Pi via the backend's /api/volume), and
+// clearing the session's conversation transcript.
 export default function SettingsOverlay({
   isActive,
   onClose,
   config,
   setConfig,
   onTestConnection,
+  onClearConversation,
 }) {
   const THEME_COLORS = [
     { name: "RED", value: "#ff4444" },
@@ -72,6 +74,15 @@ export default function SettingsOverlay({
     }
   }
 
+  // No confirmation: the transcript is session-only and re-recording is cheap.
+  // Guarded so the control is inert when the prop is not supplied.
+  const handleClearConversation = (e) => {
+    // Drop focus: a button left focused would swallow the next Space press
+    // (push-to-talk) and fire this action again instead.
+    e.currentTarget.blur()
+    if (typeof onClearConversation === "function") onClearConversation()
+  }
+
   return (
     <div
       className={`settings-overlay ${isActive ? "active" : ""}`}
@@ -105,6 +116,16 @@ export default function SettingsOverlay({
               +
             </button>
           </div>
+        </div>
+
+        <div className="form-group" style={{ marginBottom: "10px" }}>
+          <label>Conversation</label>
+          <button
+            className="overlay-btn btn-sm"
+            onClick={handleClearConversation}
+          >
+            Clear conversation
+          </button>
         </div>
 
         <div className="form-group">
@@ -175,7 +196,7 @@ export default function SettingsOverlay({
             onChange={(e) => handleChange("keyboardMode", e.target.value)}
           >
             <option value="landscape">
-              Landscape — active person (Space / Z / ← →)
+              Landscape — active person (Enter / Space / ← →)
             </option>
             <option value="vertical">
               Vertical — two-hand (Z / X / ← → / − +)
