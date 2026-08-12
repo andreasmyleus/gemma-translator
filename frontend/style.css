@@ -48,7 +48,23 @@ body {
   cursor: none;
 }
 
-@media (min-width: 1001px) {
+/* Center the 480x320 kiosk in any larger viewport (desktop / Conductor).
+   On a real 480x320 display this is a no-op. */
+body {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 100vw;
+  min-height: 100vh;
+}
+
+#root {
+  width: 480px;
+  height: 320px;
+  flex-shrink: 0;
+}
+
+@media (min-width: 481px) {
   html,
   body {
     cursor: auto;
@@ -57,12 +73,6 @@ body {
   #root {
     border: 1px solid var(--border-color);
   }
-}
-
-body {
-  display: flex;
-  justify-content: flex-start;
-  align-items: flex-start;
 }
 
 /* App Wrapper - hardcoded 480x320 landscape */
@@ -254,9 +264,11 @@ body {
   position: absolute;
   top: 6px;
   left: 10px;
+  right: 10px;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  z-index: 6;
 }
 
 .lane-label {
@@ -266,12 +278,79 @@ body {
 }
 
 .key-hint {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   color: var(--bg-black);
   background: var(--red-bright);
-  padding: 1px 3px;
+  padding: 1px 4px;
   border-radius: 2px;
+  letter-spacing: 0.04em;
+}
+
+.language-lane.recording .key-hint {
+  color: var(--red-bright);
+  background: var(--bg-black);
+}
+
+.keyboard-legend {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  height: 22px;
+  padding: 0 8px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-black);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--red-bright);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.keyboard-legend kbd,
+.keyboard-help kbd {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--bg-black);
+  background: var(--red-bright);
+  padding: 0 3px;
+  border-radius: 2px;
+  letter-spacing: 0.03em;
+}
+
+.keyboard-help {
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.keyboard-help p,
+.keyboard-help li {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--red-bright);
+  font-weight: 400;
+}
+
+.keyboard-help ul {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+}
+
+.keyboard-help-note {
+  opacity: 0.85;
+  font-size: 11px !important;
 }
 
 /* Revolver Drum Language Selector */

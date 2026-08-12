@@ -130,7 +130,14 @@ else
     echo "[start.sh] Access the UI at http://localhost:${WEB_PORT}"
 fi
 
-# Wait for any child to exit (then the trap will clean up the others)
-wait -n
-echo "[start.sh] A child process exited. Shutting down."
-exit 1
+# Wait for any child to exit (then the trap will clean up the others).
+# Polled rather than `wait -n`, which needs bash 4.3+ (macOS ships 3.2).
+while :; do
+    for pid in $LITERT_PID $API_PID $WEB_PID; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "[start.sh] A child process exited. Shutting down."
+            exit 1
+        fi
+    done
+    sleep 1
+done

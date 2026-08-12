@@ -2,20 +2,21 @@
 
 # Gemma Translator
 
-This repo was built with the assistance of [Google Antigravity](https://antigravity.google/) and includes code to run an on-device, fully offline voice translator powered by [Gemma 4](https://ai.google.dev/gemma/docs/core) and [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-lm). This project features a web frontend optimized for small handheld displays (e.g., 480x320) and a Python API server (`http.server`) that communicates with Gemma. Text-to-speech is powered by [Moonshine](https://github.com/moonshine-ai/moonshine).
+This repo was built with the assistance of [Google Antigravity](https://antigravity.google/) and includes code to run an on-device, fully offline voice translator powered by [Gemma 4](https://ai.google.dev/gemma/docs/core) and [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-lm). This project features a web frontend optimized for small handheld displays (e.g., 480x320) and a Python API server (`http.server`) that communicates with Gemma. Speech recognition is powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and speech synthesis by [Piper](https://github.com/OHF-Voice/piper1-gpl).
 
 https://github.com/user-attachments/assets/343072ce-dc78-44a7-a783-99312845cabe
 
 ## Features
 
 - **On-Device Inference**: Uses LiteRT-LM to run the `gemma4-e2b` model entirely locally. No internet required after setup.
+- **Nordic Languages**: Swedish and Finnish are supported alongside the original six (see [Languages](#languages)).
 - **Voice Interface**: Captures microphone audio, processes it, and sends it to the local model.
 - **Optimized UI**: Retro-terminal styling custom-built for small hardware screens (like Raspberry Pi displays).
 - **Unified Startup**: One script to launch the LLM server, the Python API, and the React frontend.
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.10+. `setup.sh` picks the newest `python3.1x` on `PATH` that qualifies; override with `PYTHON=/path/to/python3 ./setup.sh`
 - Node.js 18+ (20 LTS recommended) & npm — installed automatically by `deploy-pi.sh` on Raspberry Pi OS / Debian
 - Linux or macOS
 
@@ -65,6 +66,56 @@ The application will be accessible at:
 - **Web UI (Prod) / API server**: `http://localhost:3000`
 - **LiteRT-LM**: `http://localhost:9379`
 
+## Languages
+
+The lanes default to **Swedish** and **English**; rotate to Finnish, Arabic, Spanish, Japanese, Chinese, or Korean with the arrow keys. Each leg of the pipeline runs one engine:
+
+| Step | Engine |
+| :--- | :--- |
+| Speech recognition (all languages) | faster-whisper (`small`, int8 CPU) |
+| Translation (all languages) | Gemma 4 E2B via LiteRT-LM |
+| Speech synthesis (all but `ja`) | Piper |
+| Speech synthesis (`ja`) | moonshine-voice (Kokoro) |
+
+The backend pre-warms the models for both default lanes at startup, so the first server start downloads the Whisper and Piper models (~500MB combined) into `~/.cache/huggingface` and `~/.local/share/piper-voices`. Everything runs offline afterwards. Two environment variables tune this:
+
+- `WHISPER_MODEL_SIZE`: Whisper checkpoint (default `small`). `medium` is noticeably more accurate on Swedish and Finnish but roughly 3x slower. Any faster-whisper-compatible model ID works, including Swedish-tuned ones such as `KBLab/kb-whisper-medium`.
+- `PIPER_VOICE_DIR`: where Piper voices are stored (default `~/.local/share/piper-voices`).
+
+### Adding a language
+
+1. Add it to `AVAILABLE_LANGUAGES` in `frontend/src/TranslatorApp.jsx`.
+2. In `backend/server.py`, add its code to `SUPPORTED_STT_LANGS` (Whisper covers ~99 languages; an unlisted code is auto-detected instead) and to `PIPER_VOICE_MAP`, picking a voice ID from `piper.download_voices.list_voices()`.
+
+Piper covers 54 languages but has no Japanese voice, which is the one case still routed to moonshine-voice via `TTS_LANG_MAP`. Any other language Piper lacks needs the same treatment, or a different engine.
+
+## Latency notes & ideas
+
+A typical push-to-talk round trip is ~7s today. Rough split on this Mac (CPU, Whisper `small` int8):
+
+| Step | Time | Notes |
+| :--- | :--- | :--- |
+| STT (faster-whisper) | ~1s | Dominated by Whisper's fixed 30s mel padding |
+| Translation (Gemma) | 1–6s | The main remaining cost |
+| TTS (Piper) | ~0.1s | Already fast |
+
+Moonshine was ~4–7× faster than stock Whisper on 1–3s clips for the same reason (no 30s pad), but it has no Swedish/Finnish. Benchmarks showed that padding only to *audio length + ~5s silence* (instead of 30s), plus `cpu_threads=8`, brings Whisper roughly to Moonshine parity with no WER loss on the clips tested. That patch is **not** in the tree yet — it needs a `pad_or_trim` monkeypatch and a safety margin (zero padding loops).
+
+### Ideas worth trying next (not implemented)
+
+Ordered by expected impact on perceived latency:
+
+1. **Whisper short padding + `cpu_threads`** — env-gated (+5s margin, keep 30s as default). Closes most of the Moonshine gap (~0.7s/utterance).
+2. **Drop the JSON wrapper on Gemma** — ask for plain translation text instead of `{"translation":"..."}`. Fewer output tokens; the UI already falls back if JSON parse fails.
+3. **Stream Gemma → TTS** — synthesize/play the first sentence while the rest generates. Cuts perceived wait by 1–3s even if wall time is unchanged (needs LiteRT streaming + sentence buffering).
+4. **Prefetch TTS chunk N+1 while chunk N plays** — `playTTS` today fetches the next chunk only after `onended`.
+5. **Whisper decode flags** — `without_timestamps=True`, `condition_on_previous_text=False` alongside `cpu_threads` (~0.2s, stabler short clips).
+6. **Trim leading/trailing silence** before STT — shorter audio helps short-pad Whisper and sends less noise to Gemma.
+7. **Binary PCM upload** instead of base64 Float32 — tiny on 2–3s clips; more relevant on a Pi.
+8. **Lighter Piper voices** (`…-low` / `…-x_low`) — TTS is already ~0.1s; mainly a Pi memory/CPU win at some quality cost.
+
+Suggested build order: (1)+(5) together, then (2), then (3) if it still feels slow.
+
 ## Raspberry Pi Appliance Deployment
 
 To deploy as a permanent systemd kiosk service on a Raspberry Pi 5 (8GB):
@@ -76,7 +127,7 @@ This automated script installs Debian audio/venv packages, sets up the Python en
 ## Project Structure
 
 - `frontend/` - React (Vite) web frontend (`index.html`, `src/`, styles, and Vite configuration).
-- `backend/` - Python API server (`server.py` and `requirements.txt`) for Moonshine STT, moonshine-voice TTS, and model proxying.
+- `backend/` - Python API server (`server.py` and `requirements.txt`) for Whisper STT, Piper TTS, and model proxying.
 - `deploy/` - Parameterizable systemd service unit template (`gemma-translator.service`).
 - `stl/` - STL files for 3D printing the hardware case.
 - `setup.sh` - Automates Python virtual environment creation and dependency installation.
@@ -92,7 +143,7 @@ The app has two lanes (two people facing each other on the kiosk):
 - **Lane 1 / Person 1** — the left/top lane.
 - **Lane 2 / Person 2** — the right/bottom lane.
 
-Each lane has a rotating language "revolver" and records speech, which is transcribed (Moonshine STT), translated (Gemma), and spoken back in the other lane's language (moonshine-voice TTS).
+Each lane has a rotating language "revolver" and records speech, which is transcribed (Whisper STT), translated (Gemma), and spoken back in the other lane's language (Piper TTS).
 
 ### Landscape Mode (default) — "active person"
 One lane is the **active person** at a time. The active lane is framed with **corner brackets on all four corners**. You drive everything from a single set of keys and switch focus with Space.
