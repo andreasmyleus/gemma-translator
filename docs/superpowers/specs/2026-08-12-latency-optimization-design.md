@@ -191,14 +191,27 @@ workspace-stack på 3000. Enradig ändring, inget beteende ändras utan env-var.
 Varje punkt är en commit plus en bench-körning. Ordningen är vald så att
 mätningen blir stabil innan vi börjar jaga millisekunder.
 
-### Steg 0 (före baseline): deterministisk LLM
+### Vad mätning mot den körande litert-lm faktiskt visade
 
-`temperature: 0` och ett `max_tokens`-tak i `translateText`.
+Innan planen skrevs sonderades API:t på 9379. Fyra fynd som ändrar designen:
 
-Detta är **inte** i första hand en latensåtgärd. Gemma ger idag olika lång
-output mellan körningar, vilket gör alla LLM-siffror brusiga och gör
-kvalitetsgrindens översättningsdiff värdelös. Utan det här steget kan vi inte
-skilja regression från slump. `max_tokens` skyddar dessutom mot rundgång.
+1. **`max_tokens` ignoreras.** `max_tokens: 5` på "räkna till 50" gav hela
+   uppräkningen. Det tänkta taket i steg 0 är alltså en no-op och stryks.
+2. **`usage` saknas i svaret** (`null`). Frontendens `Tokens: N` i drawern
+   visar därför alltid 0 idag, och bench kan inte mäta tokenantal via API:t —
+   outputlängd mäts i tecken i stället.
+3. **Strömning fungerar.** `stream: true` ger SSE med
+   `chat.completion.chunk` och `delta.content`. Optimering 8 är genomförbar.
+4. **Det finns en GPU-variant**: modell-ID `gemma4-e2b,gpu` vid sidan av
+   `gemma4-e2b`. Uppmätt på denna Mac med kort systemprompt: 1126–1660 ms på
+   CPU mot 579 ms varm på GPU, men 7344 ms på första anropet (modelladdning).
+   Det är ungefär en halvering av det dyraste steget och läggs till som
+   optimering 9.
+
+Med identisk prompt gav CPU-varianten ordagrant samma svar två körningar i
+rad, så genereringen verkar redan vara greedy. Steg 0 krymper därmed till
+`temperature: 0` för säkerhets skull, och variansen hanteras i stället av
+bench (median av tre, med min/max redovisat).
 
 ### Baseline
 
@@ -217,6 +230,13 @@ den.
 | 6 | TTS | Prefetcha chunk N+1 medan N spelar | Tar bort glappen mellan chunkar |
 | 7 | Klient | 16 kHz direkt från `getUserMedia`; ingen `await close()` på kritiska vägen; binär PCM i stället för base64 | Små men gratis; base64 kostar 33 % extra payload |
 | 8 | LLM | `stream: true` genom en icke-buffrande proxy → mening 1 till TTS medan resten genereras | Störst upplevd vinst |
+| 9 | LLM | Modell-ID `gemma4-e2b,gpu` i stället för `gemma4-e2b`, med förvärmning vid start | Halverar LLM-steget på Mac (579 ms mot 1126–1660 ms uppmätt) |
+
+**Om punkt 9**: GPU-varianten kostar 7,3 s på första anropet medan modellen
+laddas, så den kräver ett förvärmningsanrop vid uppstart för att inte straffa
+första översättningen. Den är dessutom Mac-specifik och ska **inte** göras
+till default i repot utan att ha verifierats på Pi 5 — den läggs in som ett
+val i inställningarna och mäts, inte som ny standard.
 
 **Om punkt 4**: idag är första TTS-chunken upp till 180 tecken, vilket för en
 normal översättning är *hela texten*. Första ljudet väntar alltså på att allt
