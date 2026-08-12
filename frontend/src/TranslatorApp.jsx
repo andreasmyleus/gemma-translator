@@ -100,6 +100,12 @@ function TranslatorApp({ config }) {
       const chunks = splitTextIntoSpeechChunks(text)
       if (chunks.length === 0) return
 
+      // Bind this playback to the marks object that was current when it
+      // started. Re-reading timingRef.current inside onplaying would let a
+      // late-firing chunk from a previous utterance stamp `logged` on the
+      // *next* utterance's marks, silently suppressing its measurement.
+      const marks = timingRef.current
+
       let chunkIndex = 0
 
       const playNextChunk = () => {
@@ -113,7 +119,6 @@ function TranslatorApp({ config }) {
         onlineAudioPlayerRef.current = player
 
         player.onplaying = () => {
-          const marks = timingRef.current
           if (!marks || marks.logged) return
           marks.logged = true
           const since = (mark) => `${(mark - marks.keyup) | 0}ms`
