@@ -1463,23 +1463,46 @@ och `Skrev bench/results/smoke.json`. Exitkod 0.
 
 Grinden måste bevisas innan vi litar på den.
 
+Två fällor att undvika, båda funna genom att en tidigare version av det här
+steget bevisade fel sak:
+
+- **Mutera `corpus_wer`, inte fixturernas `wer`.** `gate()` läser bara det
+  översta `corpus_wer`-fältet. Att sänka per-fixtur-WER påverkar ingenting
+  och ger en körning som passerar — vilket ser ut som att grinden är trasig,
+  eller värre, som att den fungerar om man inte tittar noga.
+- **Jämför samma fixturuppsättning.** Kör man `--fixtures sv-short` mot en
+  jämförelsekörning som innehåller två fixturer skiljer sig korpus-WER redan
+  av den anledningen, och då fäller grinden av fel skäl.
+
 Run:
 ```bash
 venv/bin/python3 -c "
 import json, pathlib
 path = pathlib.Path('bench/results/smoke.json')
 data = json.loads(path.read_text(encoding='utf-8'))
-for fixture in data['fixtures'].values():
-    fixture['wer'] = max(0.0, fixture['wer'] - 0.5)
+# Nolla korpusfelen: jämförelsekörningen utger sig då för att ha varit felfri,
+# så vilken verklig WER som helst i den nya körningen är en regression.
+data['corpus_wer'] = 0.0
+data['corpus_edits'] = 0
 pathlib.Path('bench/results/smoke-strict.json').write_text(
     json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
-print('skrev en konstlad baseline med 0.5 lägre WER')
+print(f'skrev en konstlad felfri baseline (riktig korpus-WER var {json.loads(path.read_text(encoding=\"utf-8\"))[\"corpus_wer\"]:.3f})')
 "
-venv/bin/python3 -m bench.bench --label smoke-check --compare smoke-strict --fixtures sv-short --repeats 2
+venv/bin/python3 -m bench.bench --label smoke-check --compare smoke-strict --fixtures sv-short,en-short --repeats 2
 echo "exitkod: $?"
 ```
-Expected: utskriften innehåller en `REGRESSION sv-short: WER ...`-rad och
-`exitkod: 1`.
+Expected: utskriften innehåller en `REGRESSION korpus-WER 0.000 → ...`-rad och
+`exitkod: 1`. Notera att `--fixtures` är samma lista som i steg 3.
+
+Bevisa sedan motsatsen — att grinden *inte* fäller när kvaliteten hålls:
+
+Run:
+```bash
+venv/bin/python3 -m bench.bench --label smoke-nochange --compare smoke --fixtures sv-short,en-short --repeats 2
+echo "exitkod: $?"
+```
+Expected: ingen `REGRESSION`-rad och `exitkod: 0`. En grind som alltid fäller
+är lika värdelös som en som aldrig gör det.
 
 - [ ] **Step 5: Städa bort rökprovsfilerna**
 
