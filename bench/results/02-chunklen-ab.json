@@ -1,0 +1,845 @@
+{
+  "label": "02-chunklen-ab",
+  "mode": "ab",
+  "ab_env": {
+    "STT_CHUNK_MARGIN_S": "5"
+  },
+  "arm_a": {
+    "label": "02-chunklen-ab-a",
+    "fixtures": {
+      "sv-short": {
+        "ok": true,
+        "errors": [],
+        "translation": "Where are the stones?",
+        "transcript": "Vad ligger stånarna?",
+        "chunk_count": 1,
+        "upload_bytes": 130776,
+        "edits": 2,
+        "ref_words": 3,
+        "wer": 0.6666666666666666,
+        "stt_ms": {
+          "median": 1142.425250436645,
+          "min": 1013.7581250164658,
+          "max": 1349.723874940537
+        },
+        "llm_ms": {
+          "median": 947.2030210308731,
+          "min": 932.6908329967409,
+          "max": 998.9974159980193
+        },
+        "tts_first_ms": {
+          "median": 43.30697894329205,
+          "min": 38.975207949988544,
+          "max": 48.19124995265156
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 2148.5687703825533,
+          "min": 2012.55724998191,
+          "max": 2338.5124169290066
+        },
+        "wall_total_ms": {
+          "median": 2148.5687703825533,
+          "min": 2012.55724998191,
+          "max": 2338.5124169290066
+        }
+      },
+      "sv-medium": {
+        "ok": true,
+        "errors": [],
+        "translation": "Excuse me, can you tell me how I get to the stands from here?",
+        "transcript": "Ursäkta kan du berätta hur jag tar mig till stånden härifrån.",
+        "chunk_count": 1,
+        "upload_bytes": 308112,
+        "edits": 1,
+        "ref_words": 11,
+        "wer": 0.09090909090909091,
+        "stt_ms": {
+          "median": 1263.8033960247412,
+          "min": 1201.0383340530097,
+          "max": 1320.5394159303978
+        },
+        "llm_ms": {
+          "median": 1472.2535210312344,
+          "min": 1462.975750095211,
+          "max": 1521.6007499257103
+        },
+        "tts_first_ms": {
+          "median": 152.17389597091824,
+          "min": 133.45216598827392,
+          "max": 176.805124967359
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 2895.1994585222565,
+          "min": 2811.8858330417424,
+          "max": 2990.588416927494
+        },
+        "wall_total_ms": {
+          "median": 2895.1994585222565,
+          "min": 2811.8858330417424,
+          "max": 2990.588416927494
+        }
+      },
+      "sv-long": {
+        "ok": true,
+        "errors": [],
+        "translation": "I would need to book a room for two nights, preferably with a sea view. I also wonder if breakfast is included in the price or if it costs extra.",
+        "transcript": "Jag skulle behöva boka ett rum för två nätter helst med utsitt mot havetter. Och jag undrar också om frukosten ingår i priset eller om den kostar extra.",
+        "chunk_count": 1,
+        "upload_bytes": 857960,
+        "edits": 2,
+        "ref_words": 28,
+        "wer": 0.07142857142857142,
+        "stt_ms": {
+          "median": 1877.1506459452212,
+          "min": 1786.2977919867262,
+          "max": 3380.245333071798
+        },
+        "llm_ms": {
+          "median": 5455.556833476294,
+          "min": 5311.72175006941,
+          "max": 7493.094708072022
+        },
+        "tts_first_ms": {
+          "median": 368.0631250026636,
+          "min": 343.7202500645071,
+          "max": 1302.4785839952528
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 7692.141000472475,
+          "min": 7458.9990000240505,
+          "max": 12175.818625139073
+        },
+        "wall_total_ms": {
+          "median": 7692.141000472475,
+          "min": 7458.9990000240505,
+          "max": 12175.818625139073
+        }
+      },
+      "fi-short": {
+        "ok": true,
+        "errors": [],
+        "translation": "Where is the station?",
+        "transcript": "Missä asemahan?",
+        "chunk_count": 1,
+        "upload_bytes": 112940,
+        "edits": 2,
+        "ref_words": 3,
+        "wer": 0.6666666666666666,
+        "stt_ms": {
+          "median": 1120.5951874726452,
+          "min": 1067.9663750343025,
+          "max": 1221.2358750402927
+        },
+        "llm_ms": {
+          "median": 925.2739375224337,
+          "min": 871.0705840494484,
+          "max": 973.6203749198467
+        },
+        "tts_first_ms": {
+          "median": 55.50072941696271,
+          "min": 51.26025003846735,
+          "max": 76.76641701254994
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 2125.375791976694,
+          "min": 2040.3780840570107,
+          "max": 2173.529916908592
+        },
+        "wall_total_ms": {
+          "median": 2125.375791976694,
+          "min": 2040.3780840570107,
+          "max": 2173.529916908592
+        }
+      },
+      "fi-medium": {
+        "ok": true,
+        "errors": [],
+        "translation": "Excuse me, could you tell me how I get to the station from here?",
+        "transcript": "Anteeksi, voisitko kertoa miten pääsen asemalle täältä?",
+        "chunk_count": 1,
+        "upload_bytes": 343776,
+        "edits": 0,
+        "ref_words": 7,
+        "wer": 0.0,
+        "stt_ms": {
+          "median": 1756.12125050975,
+          "min": 1629.2152079986408,
+          "max": 2741.0926671000198
+        },
+        "llm_ms": {
+          "median": 2211.606187571306,
+          "min": 1565.281542018056,
+          "max": 2342.777208890766
+        },
+        "tts_first_ms": {
+          "median": 220.47322953585535,
+          "min": 163.87370799202472,
+          "max": 238.87512495275587
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 4187.477188534103,
+          "min": 3373.489666962996,
+          "max": 5309.072750154883
+        },
+        "wall_total_ms": {
+          "median": 4187.477188534103,
+          "min": 3373.489666962996,
+          "max": 5309.072750154883
+        }
+      },
+      "fi-long": {
+        "ok": true,
+        "errors": [],
+        "translation": "I would like to book a room for two people, preferably with a sea view, and I would also like to know if breakfast is included in the price or if it is charged separately.",
+        "transcript": "Haluaisin varata huoneen kahdeksi-yäksi mieluiten merinnäköalalla ja haluaisin myös tietää sisältyykö aamiainen hintaan vai maksako se erikseen.",
+        "chunk_count": 1,
+        "upload_bytes": 839136,
+        "edits": 4,
+        "ref_words": 18,
+        "wer": 0.2222222222222222,
+        "stt_ms": {
+          "median": 2380.4915834916756,
+          "min": 2136.3696249900386,
+          "max": 4421.242707991041
+        },
+        "llm_ms": {
+          "median": 6874.493562034331,
+          "min": 6257.33950000722,
+          "max": 8376.525708008558
+        },
+        "tts_first_ms": {
+          "median": 510.3533960063942,
+          "min": 471.4701250195503,
+          "max": 675.2059159334749
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 10431.508354027756,
+          "min": 9068.915040930733,
+          "max": 11936.89891602844
+        },
+        "wall_total_ms": {
+          "median": 10431.508354027756,
+          "min": 9068.915040930733,
+          "max": 11936.89891602844
+        }
+      },
+      "en-short": {
+        "ok": true,
+        "errors": [],
+        "translation": "Var är stationen?",
+        "transcript": "Where is the station?",
+        "chunk_count": 1,
+        "upload_bytes": 98080,
+        "edits": 0,
+        "ref_words": 4,
+        "wer": 0.0,
+        "stt_ms": {
+          "median": 1274.1449790191837,
+          "min": 1186.5860420512035,
+          "max": 1634.629208012484
+        },
+        "llm_ms": {
+          "median": 1120.2735624392517,
+          "min": 1081.4492920180783,
+          "max": 1132.637249887921
+        },
+        "tts_first_ms": {
+          "median": 64.137417008169,
+          "min": 55.79583300277591,
+          "max": 65.94420899637043
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 2431.0230835108086,
+          "min": 2379.9030008958653,
+          "max": 2832.2045829845592
+        },
+        "wall_total_ms": {
+          "median": 2431.0230835108086,
+          "min": 2379.9030008958653,
+          "max": 2832.2045829845592
+        }
+      },
+      "en-medium": {
+        "ok": true,
+        "errors": [],
+        "translation": "Ursäkta, kan du berätta hur jag kommer till stationen från här?",
+        "transcript": "Excuse me, could you tell me how to get to the station from here?",
+        "chunk_count": 1,
+        "upload_bytes": 281360,
+        "edits": 0,
+        "ref_words": 14,
+        "wer": 0.0,
+        "stt_ms": {
+          "median": 1564.7144165122882,
+          "min": 1494.9453750159591,
+          "max": 1782.770499936305
+        },
+        "llm_ms": {
+          "median": 1886.8148335604928,
+          "min": 1809.028874966316,
+          "max": 1950.235459022224
+        },
+        "tts_first_ms": {
+          "median": 196.49225001921877,
+          "min": 161.0164160374552,
+          "max": 233.17949997726828
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 3621.1070416029543,
+          "min": 3518.8195829978213,
+          "max": 3966.185458935797
+        },
+        "wall_total_ms": {
+          "median": 3621.1070416029543,
+          "min": 3518.8195829978213,
+          "max": 3966.185458935797
+        }
+      },
+      "en-long": {
+        "ok": true,
+        "errors": [],
+        "translation": "Jag skulle vilja boka ett rum för två nätter, helst med utsikt över havet, och jag vill också veta om frukost ingår i priset eller om det kostar extra.",
+        "transcript": "I would like to book a room for two nights, preferably with a view of the sea, and I also want to know whether breakfast is included in the price or costs extra.",
+        "chunk_count": 1,
+        "upload_bytes": 651888,
+        "edits": 0,
+        "ref_words": 33,
+        "wer": 0.0,
+        "stt_ms": {
+          "median": 1986.0982079990208,
+          "min": 1807.2189160156995,
+          "max": 2704.0311249438673
+        },
+        "llm_ms": {
+          "median": 7395.2210624702275,
+          "min": 6632.331000058912,
+          "max": 7992.658041999675
+        },
+        "tts_first_ms": {
+          "median": 668.760645959992,
+          "min": 584.1213329695165,
+          "max": 694.1022920655087
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 10050.07991642924,
+          "min": 9023.671249044128,
+          "max": 11390.791459009051
+        },
+        "wall_total_ms": {
+          "median": 10050.07991642924,
+          "min": 9023.671249044128,
+          "max": 11390.791459009051
+        }
+      }
+    },
+    "median_time_to_first_audio_ms": 3621.1070416029543,
+    "corpus_wer": 0.09090909090909091,
+    "corpus_edits": 11,
+    "corpus_ref_words": 121
+  },
+  "arm_b": {
+    "label": "02-chunklen-ab-b",
+    "fixtures": {
+      "sv-short": {
+        "ok": true,
+        "errors": [],
+        "translation": "Where are the stones?",
+        "transcript": "Vad ligger stånarna?",
+        "chunk_count": 1,
+        "upload_bytes": 130776,
+        "edits": 2,
+        "ref_words": 3,
+        "wer": 0.6666666666666666,
+        "stt_ms": {
+          "median": 1058.2663329550996,
+          "min": 946.56800001394,
+          "max": 1244.1791669698432
+        },
+        "llm_ms": {
+          "median": 967.6067084656097,
+          "min": 940.3947909595445,
+          "max": 1031.1992920469493
+        },
+        "tts_first_ms": {
+          "median": 42.267395998351276,
+          "min": 39.862167090177536,
+          "max": 42.456667055375874
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 2086.4943329943344,
+          "min": 1948.3492920408025,
+          "max": 2259.6030009444803
+        },
+        "wall_total_ms": {
+          "median": 2086.4943329943344,
+          "min": 1948.3492920408025,
+          "max": 2259.6030009444803
+        }
+      },
+      "sv-medium": {
+        "ok": true,
+        "errors": [],
+        "translation": "Excuse me, can you tell me how I get to the stands from here?",
+        "transcript": "Ursäkta kan du berätta hur jag tar mig till stånden härifrån.",
+        "chunk_count": 1,
+        "upload_bytes": 308112,
+        "edits": 1,
+        "ref_words": 11,
+        "wer": 0.09090909090909091,
+        "stt_ms": {
+          "median": 1298.1633960152976,
+          "min": 1195.244290982373,
+          "max": 1374.0531669463962
+        },
+        "llm_ms": {
+          "median": 1469.783249485772,
+          "min": 1460.4504589224234,
+          "max": 1472.289833938703
+        },
+        "tts_first_ms": {
+          "median": 140.0771460030228,
+          "min": 125.14179199934006,
+          "max": 156.36587503831834
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 2914.520084450487,
+          "min": 2788.9941239263862,
+          "max": 2981.5587080083787
+        },
+        "wall_total_ms": {
+          "median": 2914.520084450487,
+          "min": 2788.9941239263862,
+          "max": 2981.5587080083787
+        }
+      },
+      "sv-long": {
+        "ok": true,
+        "errors": [],
+        "translation": "I would need to book a room for two nights, preferably with a sea view. I also wonder if breakfast is included in the price or if it costs extra.",
+        "transcript": "Jag skulle behöva boka ett rum för två nätter helst med utsitt mot havetter. Och jag undrar också om frukosten ingår i priset eller om den kostar extra.",
+        "chunk_count": 1,
+        "upload_bytes": 857960,
+        "edits": 2,
+        "ref_words": 28,
+        "wer": 0.07142857142857142,
+        "stt_ms": {
+          "median": 1772.6686670212075,
+          "min": 1604.7470839694142,
+          "max": 3700.2747079823166
+        },
+        "llm_ms": {
+          "median": 5582.7590834815055,
+          "min": 5452.874209033325,
+          "max": 7463.341458933428
+        },
+        "tts_first_ms": {
+          "median": 361.74087546532974,
+          "min": 322.4999998928979,
+          "max": 454.94474994484335
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 7670.778542465996,
+          "min": 7472.901459899731,
+          "max": 11618.560916860588
+        },
+        "wall_total_ms": {
+          "median": 7670.778542465996,
+          "min": 7472.901459899731,
+          "max": 11618.560916860588
+        }
+      },
+      "fi-short": {
+        "ok": true,
+        "errors": [],
+        "translation": "Where is the station?",
+        "transcript": "Missä asemahan?",
+        "chunk_count": 1,
+        "upload_bytes": 112940,
+        "edits": 2,
+        "ref_words": 3,
+        "wer": 0.6666666666666666,
+        "stt_ms": {
+          "median": 1148.932333511766,
+          "min": 1000.6029590731487,
+          "max": 1374.6363749960437
+        },
+        "llm_ms": {
+          "median": 863.2079169037752,
+          "min": 847.6574158994481,
+          "max": 944.3434999557212
+        },
+        "tts_first_ms": {
+          "median": 60.81393751082942,
+          "min": 54.69737504608929,
+          "max": 90.04541602917016
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 2079.4550414429978,
+          "min": 1915.6175010139123,
+          "max": 2383.3638329524547
+        },
+        "wall_total_ms": {
+          "median": 2079.4550414429978,
+          "min": 1915.6175010139123,
+          "max": 2383.3638329524547
+        }
+      },
+      "fi-medium": {
+        "ok": true,
+        "errors": [],
+        "translation": "Excuse me, could you tell me how I get to the station from here?",
+        "transcript": "Anteeksi, voisitko kertoa miten pääsen asemalle täältä?",
+        "chunk_count": 1,
+        "upload_bytes": 343776,
+        "edits": 0,
+        "ref_words": 7,
+        "wer": 0.0,
+        "stt_ms": {
+          "median": 1589.8993755108677,
+          "min": 1242.0925000915304,
+          "max": 1910.6060829944909
+        },
+        "llm_ms": {
+          "median": 1568.7505215173587,
+          "min": 1493.5854580253363,
+          "max": 2198.887125006877
+        },
+        "tts_first_ms": {
+          "median": 190.8413540222682,
+          "min": 161.76979197189212,
+          "max": 209.9636250641197
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 3272.886792488862,
+          "min": 3050.6566672120243,
+          "max": 4319.456833065487
+        },
+        "wall_total_ms": {
+          "median": 3272.886792488862,
+          "min": 3050.6566672120243,
+          "max": 4319.456833065487
+        }
+      },
+      "fi-long": {
+        "ok": true,
+        "errors": [],
+        "translation": "I would like to book a room for two people, preferably with a sea view, and I would also like to know if breakfast is included in the price or if it is charged separately.",
+        "transcript": "Haluaisin varata huoneen kahdeksi-yäksi mieluiten merinnäköalalla ja haluaisin myös tietää sisältyykö aamiainen hintaan vai maksako se erikseen.",
+        "chunk_count": 1,
+        "upload_bytes": 839136,
+        "edits": 4,
+        "ref_words": 18,
+        "wer": 0.2222222222222222,
+        "stt_ms": {
+          "median": 2234.461687505245,
+          "min": 2115.702292066999,
+          "max": 3513.395999907516
+        },
+        "llm_ms": {
+          "median": 6821.593229018617,
+          "min": 6708.535916986875,
+          "max": 7059.423208003864
+        },
+        "tts_first_ms": {
+          "median": 605.5768335354514,
+          "min": 505.1473749335855,
+          "max": 730.5060419021174
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 9671.283396019135,
+          "min": 9641.186500899494,
+          "max": 10972.221040981822
+        },
+        "wall_total_ms": {
+          "median": 9671.283396019135,
+          "min": 9641.186500899494,
+          "max": 10972.221040981822
+        }
+      },
+      "en-short": {
+        "ok": true,
+        "errors": [],
+        "translation": "Var är stationen?",
+        "transcript": "Where is the station?",
+        "chunk_count": 1,
+        "upload_bytes": 98080,
+        "edits": 0,
+        "ref_words": 4,
+        "wer": 0.0,
+        "stt_ms": {
+          "median": 1282.0565209840424,
+          "min": 1220.4284999752417,
+          "max": 1375.0918750884011
+        },
+        "llm_ms": {
+          "median": 1177.0447500166483,
+          "min": 1116.2610419560224,
+          "max": 1269.5980420103297
+        },
+        "tts_first_ms": {
+          "median": 73.03331251023337,
+          "min": 56.922332965768874,
+          "max": 77.6779999723658
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 2544.7552295518108,
+          "min": 2406.413915916346,
+          "max": 2684.3245839700103
+        },
+        "wall_total_ms": {
+          "median": 2544.7552295518108,
+          "min": 2406.413915916346,
+          "max": 2684.3245839700103
+        }
+      },
+      "en-medium": {
+        "ok": true,
+        "errors": [],
+        "translation": "Ursäkta, kan du berätta hur jag kommer till stationen från här?",
+        "transcript": "Excuse me, could you tell me how to get to the station from here?",
+        "chunk_count": 1,
+        "upload_bytes": 281360,
+        "edits": 0,
+        "ref_words": 14,
+        "wer": 0.0,
+        "stt_ms": {
+          "median": 1789.426937524695,
+          "min": 1478.4869169816375,
+          "max": 1947.8736669989303
+        },
+        "llm_ms": {
+          "median": 1884.1336460318416,
+          "min": 1664.8207500111312,
+          "max": 2446.607124991715
+        },
+        "tts_first_ms": {
+          "median": 248.2972500147298,
+          "min": 207.59287499822676,
+          "max": 360.5337090557441
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 3957.623875583522,
+          "min": 3350.9770419914275,
+          "max": 4683.405917021446
+        },
+        "wall_total_ms": {
+          "median": 3957.623875583522,
+          "min": 3350.9770419914275,
+          "max": 4683.405917021446
+        }
+      },
+      "en-long": {
+        "ok": true,
+        "errors": [],
+        "translation": "Jag skulle vilja boka ett rum för två nätter, helst med utsikt över havet, och jag vill också veta om frukost ingår i priset eller om det kostar extra.",
+        "transcript": "I would like to book a room for two nights, preferably with a view of the sea, and I also want to know whether breakfast is included in the price or costs extra.",
+        "chunk_count": 1,
+        "upload_bytes": 651888,
+        "edits": 0,
+        "ref_words": 33,
+        "wer": 0.0,
+        "stt_ms": {
+          "median": 2289.414791506715,
+          "min": 1792.7659580018371,
+          "max": 3137.299499940127
+        },
+        "llm_ms": {
+          "median": 7511.368104547728,
+          "min": 6919.327500043437,
+          "max": 8561.428333981894
+        },
+        "tts_first_ms": {
+          "median": 624.4826875044964,
+          "min": 581.5870000515133,
+          "max": 851.0546670295298
+        },
+        "tts_rest_ms": {
+          "median": 0.0,
+          "min": 0,
+          "max": 0
+        },
+        "time_to_first_audio_ms": {
+          "median": 10124.797000084072,
+          "min": 9894.617625046521,
+          "max": 12549.78250095155
+        },
+        "wall_total_ms": {
+          "median": 10124.797000084072,
+          "min": 9894.617625046521,
+          "max": 12549.78250095155
+        }
+      }
+    },
+    "median_time_to_first_audio_ms": 3272.886792488862,
+    "corpus_wer": 0.09090909090909091,
+    "corpus_edits": 11,
+    "corpus_ref_words": 121
+  },
+  "paired": {
+    "sv-short": {
+      "stt_ms": 0.9277622400937021,
+      "llm_ms": 1.0215757710779658,
+      "tts_first_ms": 0.9782135237268266,
+      "tts_rest_ms": null,
+      "time_to_first_audio_ms": 0.969528375417742,
+      "wall_total_ms": 0.969528375417742
+    },
+    "sv-medium": {
+      "stt_ms": 1.043851647319821,
+      "llm_ms": 0.99600193647011,
+      "tts_first_ms": 0.9085962330299442,
+      "tts_rest_ms": null,
+      "time_to_first_audio_ms": 1.0137885125663668,
+      "wall_total_ms": 1.0137885125663668
+    },
+    "sv-long": {
+      "stt_ms": 0.959790519265427,
+      "llm_ms": 1.0072396514968895,
+      "tts_first_ms": 0.9195876548832254,
+      "tts_rest_ms": null,
+      "time_to_first_audio_ms": 0.987844147753497,
+      "wall_total_ms": 0.987844147753497
+    },
+    "fi-short": {
+      "stt_ms": 1.0524226756577817,
+      "llm_ms": 0.9389595450504911,
+      "tts_first_ms": 1.0948108031845187,
+      "tts_rest_ms": null,
+      "time_to_first_audio_ms": 1.0069539781384844,
+      "wall_total_ms": 1.0069539781384844
+    },
+    "fi-medium": {
+      "stt_ms": 0.8856598153196729,
+      "llm_ms": 0.8415786885419738,
+      "tts_first_ms": 0.8663065366447047,
+      "tts_rest_ms": null,
+      "time_to_first_audio_ms": 0.8504178536382292,
+      "wall_total_ms": 0.8504178536382292
+    },
+    "fi-long": {
+      "stt_ms": 0.9262692771389043,
+      "llm_ms": 0.992603990425642,
+      "tts_first_ms": 1.119427582990855,
+      "tts_rest_ms": null,
+      "time_to_first_audio_ms": 0.9491914337030124,
+      "wall_total_ms": 0.9491914337030124
+    },
+    "en-short": {
+      "stt_ms": 0.9991510623450195,
+      "llm_ms": 1.0676269874619086,
+      "tts_first_ms": 1.1160807499277308,
+      "tts_rest_ms": null,
+      "time_to_first_audio_ms": 1.006360891192116,
+      "wall_total_ms": 1.006360891192116
+    },
+    "en-medium": {
+      "stt_ms": 1.0664100484573562,
+      "llm_ms": 0.9838686362761166,
+      "tts_first_ms": 1.3867335407558783,
+      "tts_rest_ms": null,
+      "time_to_first_audio_ms": 1.0339542766605563,
+      "wall_total_ms": 1.0339542766605563
+    },
+    "en-long": {
+      "stt_ms": 1.179369346636372,
+      "llm_ms": 1.0396687742922557,
+      "tts_first_ms": 1.0097179978592774,
+      "tts_rest_ms": null,
+      "time_to_first_audio_ms": 1.0801902119564328,
+      "wall_total_ms": 1.0801902119564328
+    }
+  },
+  "drift": {
+    "stt_ms": 0.9991510623450195,
+    "llm_ms": 0.99600193647011,
+    "tts_first_ms": 1.0097179978592774,
+    "tts_rest_ms": null,
+    "time_to_first_audio_ms": 1.006360891192116,
+    "wall_total_ms": 1.006360891192116
+  }
+}

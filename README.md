@@ -116,17 +116,17 @@ A typical push-to-talk round trip is ~7s today. Rough split on this Mac (CPU, Wh
 
 | Step | Time | Notes |
 | :--- | :--- | :--- |
-| STT (faster-whisper) | ~1s | Dominated by Whisper's fixed 30s mel padding |
+| STT (faster-whisper) | ~1s | Dominated by the CTranslate2 encoder pass, whose cost is fixed regardless of clip length |
 | Translation (Gemma) | 1–6s | The main remaining cost |
 | TTS (Piper) | ~0.1s | Already fast |
 
-Moonshine was ~4–7× faster than stock Whisper on 1–3s clips for the same reason (no 30s pad), but it has no Swedish/Finnish. Benchmarks showed that padding only to *audio length + ~5s silence* (instead of 30s), plus `cpu_threads=8`, brings Whisper roughly to Moonshine parity with no WER loss on the clips tested. That patch is **not** in the tree yet — it needs a `pad_or_trim` monkeypatch and a safety margin (zero padding loops).
+Moonshine is ~4–7× faster than Whisper on 1–3s clips, but it has no Swedish/Finnish. It was long assumed that Whisper could close that gap by padding the mel spectrogram only to *audio length + ~5s silence* instead of a fixed 30s. That was measured and **rejected** — see `bench/results/02-chunklen-ab.json`: a paired A/B run with a 5s margin moved `stt_ms` by 0.999 (B/A) against controls tight to within 1%, i.e. no effect at all, at identical corpus WER. `faster_whisper`'s `chunk_length` parameter does shorten the spectrogram (`n_samples` and `nb_max_frames` drop as expected), but CTranslate2's Whisper encoder takes a fixed-size input, so `pad_or_trim` pads the mel back out before the encoder runs. Shortening it saves only the mel computation, which is negligible next to the encoder pass. Moonshine wins because its *encoder* is variable-length, not because of padding arithmetic — so no padding trick will reproduce that win here.
 
 ### Ideas worth trying next (not implemented)
 
 Ordered by expected impact on perceived latency:
 
-1. **Whisper short padding + `cpu_threads`** — env-gated (+5s margin, keep 30s as default). Closes most of the Moonshine gap (~0.7s/utterance).
+1. **Whisper `cpu_threads`** — the untested half of the old "short padding + `cpu_threads`" idea. The short-padding half was measured and gave nothing (see above), so expectations here should be modest.
 2. **Drop the JSON wrapper on Gemma** — ask for plain translation text instead of `{"translation":"..."}`. Fewer output tokens; the UI already falls back if JSON parse fails.
 3. **Stream Gemma → TTS** — synthesize/play the first sentence while the rest generates. Cuts perceived wait by 1–3s even if wall time is unchanged (needs LiteRT streaming + sentence buffering).
 4. **Prefetch TTS chunk N+1 while chunk N plays** — `playTTS` today fetches the next chunk only after `onended`.
