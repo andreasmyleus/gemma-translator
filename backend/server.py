@@ -37,6 +37,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Any Whisper checkpoint works here, including Swedish-tuned ones (e.g. KBLab/kb-whisper-medium).
 SUPPORTED_STT_LANGS = {"sv", "fi", "en", "ar", "es", "ja", "zh", "ko"}
 WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small")
+# Optimeringar hålls bakom flaggor så att bench kan A/B-testa dem i samma
+# körning, och så att produkten behåller sitt ursprungsbeteende tills en
+# ändring är uppmätt. Defaultarna flippas när kampanjen är klar.
+STT_VAD = os.environ.get("STT_VAD", "0") == "1"
 MAX_MODELS = 2
 # Loaded at startup so the two default lanes never stall on a first utterance.
 # Keep this within MAX_MODELS or the entries just evict each other.
@@ -150,7 +154,7 @@ def transcribe(audio_np, language):
         # Klipper bort tystnad före dekodning. Kortar ljudet som når modellen
         # och tar bort de hallucinationer stock-Whisper gärna producerar på
         # tysta partier.
-        vad_filter=True,
+        vad_filter=STT_VAD,
     )
     return " ".join(s.text.strip() for s in segments)
 

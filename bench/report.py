@@ -97,6 +97,80 @@ def build_report(label, per_fixture):
     }
 
 
+def paired_ratios(runs_a, runs_b):
+    """Median av kvoten B/A per repetitionspar, per mätpunkt.
+
+    Paren mäts inom sekunder från varandra och delar därför
+    belastningstillstånd. Att i stället dela medianerna mot varandra jämför
+    aggregat som kan ha tagits under helt olika förhållanden — vilket är
+    exakt det felet den här funktionen finns för att undvika.
+    """
+    ratios = {}
+    for metric in METRICS:
+        values = []
+        for run_a, run_b in zip(runs_a, runs_b):
+            if not (run_a.ok and run_b.ok):
+                continue
+            a = getattr(run_a, metric)
+            if a > 0:
+                values.append(getattr(run_b, metric) / a)
+        ratios[metric] = median(values) if values else None
+    return ratios
+
+
+def aggregate_paired_ratios(paired_by_fixture):
+    """Median av de parvisa kvoterna över alla fixturer, per mätpunkt.
+
+    Detta är driftraden: en enda kvot per steg som täcker hela sviten. Ett
+    steg ändringen omöjligt kan påverka (t.ex. `llm_ms` för en STT-ändring)
+    ska ligga nära 1,00 här. Gör det inte det, är mätningen otillförlitlig
+    oavsett vad steget som faktiskt ändrades visar.
+    """
+    aggregate = {}
+    for metric in METRICS:
+        values = [
+            ratios[metric]
+            for ratios in paired_by_fixture.values()
+            if ratios.get(metric) is not None
+        ]
+        aggregate[metric] = median(values) if values else None
+    return aggregate
+
+
+def render_markdown_ab(label, paired_by_fixture, drift, ab_env=None):
+    """Renderar en rad per fixtur med parvis B/A-kvot, plus en driftrad per steg.
+
+    Driftraden är poängen: en läsare kan se om ett steg optimeringen omöjligt
+    kan påverka ändå rört sig, vilket är signalen att mätningen inte går att
+    lita på.
+    """
+    env_note = f" ({', '.join(f'{k}={v}' for k, v in (ab_env or {}).items())})" if ab_env else ""
+    lines = [
+        f"### {label} — parvis A/B{env_note}",
+        "",
+        "| Fixtur | STT B/A | LLM B/A | TTS #1 B/A | Till första ljud B/A |",
+        "| :--- | ---: | ---: | ---: | ---: |",
+    ]
+
+    def fmt(value):
+        return f"{value:.3f}" if value is not None else "—"
+
+    for fixture_id, ratios in paired_by_fixture.items():
+        lines.append(
+            f"| {fixture_id} "
+            f"| {fmt(ratios.get('stt_ms'))} "
+            f"| {fmt(ratios.get('llm_ms'))} "
+            f"| {fmt(ratios.get('tts_first_ms'))} "
+            f"| {fmt(ratios.get('time_to_first_audio_ms'))} |"
+        )
+
+    lines.append("")
+    lines.append("**Drift per steg (median över alla fixturer, B/A):**")
+    for metric in METRICS:
+        lines.append(f"- `{metric}`: {fmt(drift.get(metric))}")
+    return "\n".join(lines)
+
+
 def _delta(current_value, baseline_value):
     if baseline_value in (None, 0):
         return ""
