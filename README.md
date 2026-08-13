@@ -139,17 +139,90 @@ Two caveats before switching:
   *transcription*, not translation, so it cannot catch this. Switching to the
   GPU build changes translation behaviour as well as speed.
 
-## Latency notes & ideas
+## Latency
 
-A typical push-to-talk round trip is ~7s today. Rough split on this Mac (CPU, Whisper `small` int8):
+Measured with `bench/` (see [Benchmarking](#benchmarking)) on a MacBook Air M1
+(8 cores), Whisper `small` int8, `gemma4-e2b` via LiteRT-LM. Baseline: median
+time-to-first-audio 3225 ms across the original nine fixtures, corpus WER
+0.091 (11 errors / 121 reference words) — `bench/results/baseline.json`.
 
-| Step | Time | Notes |
-| :--- | :--- | :--- |
-| STT (faster-whisper) | ~1s | Dominated by the CTranslate2 encoder pass, whose cost is fixed regardless of clip length |
-| Translation (Gemma) | 1–6s | The main remaining cost |
-| TTS (Piper) | ~0.1s | Already fast |
+**A methodology note that shapes every number below.** The first optimization
+measured in this campaign (the Whisper VAD filter) initially looked like a
+20% win under `--label X --compare baseline`. It wasn't: `llm_ms`, a stage the
+VAD filter cannot touch, moved by almost exactly the same amount between the
+two runs, because the two `bench` invocations simply ran under different
+machine load. **Comparing medians from two separately-run bench labels is
+confounded and cannot be trusted for timing.** Every ratio below therefore
+comes from a **paired A/B run** — one `bench` process, one ABBA-interleaved
+sequence of repeats, both arms sharing the same load — not from a diff
+against `baseline.json`. Word error rate has no time component and isn't
+subject to this confound, so the WER comparison below *is* a valid cross-run
+diff.
 
-Moonshine is ~4–7× faster than Whisper on 1–3s clips, but it has no Swedish/Finnish. It was long assumed that Whisper could close that gap by padding the mel spectrogram only to *audio length + ~5s silence* instead of a fixed 30s. That was measured and **rejected** — see `bench/results/02-chunklen-ab.json`: a paired A/B run with a 5s margin moved `stt_ms` by 0.999 (B/A) against controls tight to within 1%, i.e. no effect at all, at identical corpus WER. `faster_whisper`'s `chunk_length` parameter does shorten the spectrogram (`n_samples` and `nb_max_frames` drop as expected), but CTranslate2's Whisper encoder takes a fixed-size input, so `pad_or_trim` pads the mel back out before the encoder runs. Shortening it saves only the mel computation, which is negligible next to the encoder pass. Moonshine wins because its *encoder* is variable-length, not because of padding arithmetic — so no padding trick will reproduce that win here.
+### Quality: corpus WER against baseline
+
+Current (`bench/results/final.json`): **0.089** (13 errors / 146 reference
+words). Baseline (`bench/results/baseline.json`): **0.091** (11 errors / 121
+reference words).
+
+The denominators aren't directly comparable: `sv-multi` was added later (for
+the streaming measurement, see below), so the current corpus has ten fixtures
+and 146 reference words against baseline's nine and 121. Read this as "no
+quality drift is visible across the campaign", not as a precise before/after
+percentage.
+
+### Results
+
+| Optimization | Result | Aggregate ratio | Long-fixture ratio | Evidence |
+| :--- | :--- | ---: | ---: | :--- |
+| Whisper VAD filter | Rejected — no measurable effect | STT 1.011 | — | `bench/results/01-vad-ab.json` |
+| Short mel padding (`STT_CHUNK_MARGIN_S`) | Rejected — no measurable effect; code reverted | STT 0.999 | — | `bench/results/02-chunklen-ab.json` |
+| Whisper decode flags (`cpu_threads`, etc.) | Never built — rejected by extension of the two STT nulls above | — | — | — |
+| Sentence-level TTS chunking | Never built — targets a stage worth ~5% of time-to-first-audio, below this harness's resolution | — | — | — |
+| TTS prefetch | Never built — same reason | — | — | — |
+| Client audio path (e.g. binary PCM upload) | Never built — same reason | — | — | — |
+| Shorter system prompt (drop the JSON wrapper) | **Real win — now the default** | `llm_ms` 0.620 | 0.341–0.395 | `bench/results/05-plain-prompt.json` |
+| GPU model build (`gemma4-e2b,gpu`) | **Real win — opt-in, not the default** (see [above](#the-gpu-model-variant-mac-only-opt-in)) | `llm_ms` 0.771 | 0.366–0.399 | `bench/results/09-gpu-model.json` |
+| Streaming Gemma → TTS | **Accepted, narrow — now the default** | time-to-first-audio 0.985 (a null) | `sv-multi` 0.851, `sv-long` 0.936 | `bench/results/15-streaming.json` |
+
+"Aggregate ratio" and "long-fixture ratio" are B/A medians from each paired
+A/B run (optimization on ÷ optimization off); below 1.0 is faster. Rejected
+and never-built rows have no ratio: either the paired run showed no
+distinguishable effect against the ~1–3% noise floor set by two control
+stages the optimization cannot touch, or the optimization was never
+implemented, so there is nothing to cite. Two of nine optimizations produced
+real wins, one is narrow, three were rejected (two measured directly, one by
+extension of that measurement), and three were never built because they
+targeted a combined ~5% of the metric — below what this harness can resolve.
+
+### Whisper's cost is a fixed-size encoder pass
+
+Two independent optimizations tried to shrink Whisper's cost by shrinking the
+audio fed to it. Both measured as nulls:
+
+- **VAD filter** (trim silence before decoding, `STT_VAD=1`): STT ratio
+  **1.011** — no improvement, if anything slightly slower.
+  `bench/results/01-vad-ab.json`. Left env-gated off by default.
+- **Short mel padding** (`STT_CHUNK_MARGIN_S=5`, pad only to audio length +
+  ~5s instead of the fixed 30s): STT ratio **0.999**.
+  `bench/results/02-chunklen-ab.json`. Code reverted.
+
+Both are explained by the same mechanism. `faster_whisper`'s `chunk_length`
+parameter does shorten the mel spectrogram as expected (`n_samples` and
+`nb_max_frames` drop), but CTranslate2's Whisper encoder takes a **fixed-size
+input** — `pad_or_trim` pads the mel back out to the full window before the
+encoder runs. Shortening the audio therefore saves only the mel computation,
+which is negligible next to the encoder pass itself. Moonshine is ~4–7×
+faster than Whisper on short clips because its *encoder* is variable-length,
+not because of any padding arithmetic — no padding or silence-trimming trick
+will reproduce that win on Whisper.
+
+**Consequence for anyone chasing STT latency next: don't shorten the audio.**
+Change the encoder itself, or the number of encoder passes. This is also why
+Whisper decode flags (`without_timestamps=True`,
+`condition_on_previous_text=False`, `cpu_threads`) were never built — after
+two STT nulls with the mechanism understood, they were judged the least
+promising lever left, and the remaining effort went to streaming instead.
 
 ### The system prompt is a latency cost — there is a context cliff
 
@@ -197,20 +270,22 @@ That is not hypothetical — it has now happened three times. The GPU build (0.7
 
 Read every aggregate in `bench/results/` with that in mind, and add longer-output fixtures before concluding that a length-scaling optimization is worthless.
 
-### Ideas worth trying next (not implemented)
+### Summary
 
-Ordered by expected impact on perceived latency:
+Nine optimizations were tried. Two produced real, shipped wins (the shorter
+system prompt, the opt-in GPU build). One produced a narrow, real win visible
+only on multi-sentence output (streaming). Two were measured directly and
+rejected (the VAD filter, short mel padding), and a third (Whisper decode
+flags) was rejected by extension of that same measurement without being
+built. The remaining three (sentence-level TTS chunking, TTS prefetch, the
+client audio path) were never built because they targeted a combined ~5% of
+time-to-first-audio — below what a ~1–3% noise floor lets this harness
+resolve.
 
-1. **Whisper `cpu_threads`** — the untested half of the old "short padding + `cpu_threads`" idea. The short-padding half was measured and gave nothing (see above), so expectations here should be modest.
-2. **Shorten the system prompt further** — the JSON wrapper is already gone (see the context-cliff section above). Remaining headroom is bounded: below the cliff prompt length is free, so this buys a longer utterance before the 2.6× penalty hits, not a general speedup.
-3. **Whisper decode flags** — `without_timestamps=True`, `condition_on_previous_text=False` alongside `cpu_threads` (~0.2s, stabler short clips).
-4. **Trim leading/trailing silence** before STT — shorter audio helps short-pad Whisper and sends less noise to Gemma.
-5. **Binary PCM upload** instead of base64 Float32 — tiny on 2–3s clips; more relevant on a Pi.
-6. **Lighter Piper voices** (`…-low` / `…-x_low`) — TTS is already ~0.1s; mainly a Pi memory/CPU win at some quality cost.
-
-Streaming Gemma → TTS and TTS prefetching were both on this list and are now implemented — the TTS queue introduced with streaming supersedes the separate prefetch idea, since queued sentences already download while the current one plays.
-
-Suggested build order: (1)+(3) together.
+That is the honest shape of the result: most ideas on the original list
+turned out not to matter on this fixture set, and finding that out with a
+paired measurement before building all of them — rather than shipping each
+one on faith — was the point of the campaign.
 
 ## Raspberry Pi Appliance Deployment
 
