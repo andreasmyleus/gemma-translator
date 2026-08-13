@@ -110,6 +110,28 @@ word moves a single fixture's WER by 3 to 33 points, so a per-fixture threshold
 would be zero tolerance wearing a percentage sign. Results are committed to
 `bench/results/` as a history of the optimization campaign.
 
+Things worth knowing before you run it:
+
+- **The port must be free.** bench refuses to start if anything already listens
+  on `--api-port` (or, in A/B mode, `--api-port + 1`). It cannot measure against
+  someone else's process, and the failure mode it prevents is silent: arm B
+  would run arm A's configuration and every ratio would read ≈1.000, which is
+  indistinguishable from "the optimization had no effect".
+- **`--repeats` must be odd.** The first repetition is discarded, and the ABBA
+  interleave starts A-first, so an even count gives one arm an extra order
+  position. Default 5.
+- **`--prompt {plain,json}`** picks the system prompt. `plain` is the default
+  and is the prompt the product actually sends; `json` is the retired wrapper
+  prompt, kept so the measurement behind it can be reproduced. `bench` asserts
+  that its `plain` prompt is byte-identical to the one in `TranslatorApp.jsx`.
+- **`--stream`** measures the streaming LLM path in single-arm mode; use
+  `--ab-stream` to compare it against non-streaming in one paired run. The two
+  cannot be combined — in A/B mode arm A is the unchanged, non-streaming arm by
+  definition.
+- **The Δ column is dropped when two runs measured different configurations**
+  (model, prompt or streaming), including when the older run predates
+  provenance recording. WER is still compared: it has no time component.
+
 ### The GPU model variant (Mac only, opt-in)
 
 On machines with a supported GPU, litert-lm also serves the same weights as
@@ -183,7 +205,7 @@ percentage.
 | Client audio path (e.g. binary PCM upload) | Never built — same reason | — | — | — |
 | Shorter system prompt (drop the JSON wrapper) | **Real win — now the default** | `llm_ms` 0.620 | 0.341–0.395 | `bench/results/05-plain-prompt.json` |
 | GPU model build (`gemma4-e2b,gpu`) | **Real win — opt-in, not the default** (see [above](#the-gpu-model-variant-mac-only-opt-in)) | `llm_ms` 0.771 | 0.366–0.399 | `bench/results/09-gpu-model.json` |
-| Streaming Gemma → TTS | **Accepted, narrow — now the default** | time-to-first-audio 0.985 (a null) | `sv-multi` 0.851, `sv-long` 0.936 | `bench/results/15-streaming.json` |
+| Streaming Gemma → TTS | **Accepted, narrow — now the default** | time-to-first-audio 0.996 (a null) | `sv-multi` 0.760, `sv-long` 0.822 | `bench/results/15-streaming.json` |
 
 "Aggregate ratio" and "long-fixture ratio" are B/A medians from each paired
 A/B run (optimization on ÷ optimization off); below 1.0 is faster. Rejected
@@ -252,13 +274,15 @@ The LLM response is streamed, and each sentence is synthesized and played as soo
 
 | Fixture | Time-to-first-audio B/A | Why |
 | :--- | ---: | :--- |
-| `sv-multi` (three sentences out) | **0.851** | audio starts 1290 ms before generation ends |
-| `sv-long` (internal sentence break) | 0.936 | 557 ms of overlap |
-| the other 8 (single sentence) | 0.969–1.019 | nothing to overlap; neutral |
+| `sv-multi` (three sentences out) | **0.760** | audio starts 1083 ms before generation ends |
+| `sv-long` (internal sentence break) | **0.822** | 697 ms of overlap |
+| the other 8 (single sentence) | 0.954–1.061 | nothing to overlap; neutral |
 
-The suite-wide aggregate is 0.985 — a null. **Do not quote that figure without the qualification**: on its own it reads as "streaming does nothing", which is wrong in the other direction. Nine of the ten fixtures are structurally incapable of showing the effect because they translate to one sentence, so the aggregate describes the fixture set rather than the optimization.
+The suite-wide aggregate is 0.996 — a null. **Do not quote that figure without the qualification**: on its own it reads as "streaming does nothing", which is wrong in the other direction. Eight of the ten fixtures are structurally incapable of showing the effect because they translate to one sentence, so the aggregate describes the fixture set rather than the optimization. On the two that can show it, the first sentence lands at 47% and 62% of the full response time, and that whole remainder is spent talking rather than waiting.
 
-All three stage controls came in at 0.999 / 0.998 / 0.999 — the cleanest run of the campaign — and all ten translations were byte-identical across arms, so the null on single-sentence output is a real measurement rather than an effect lost in noise.
+Both stage controls that streaming cannot touch came in clean — `stt_ms` 1.004 and `llm_ms` 1.009 — and all ten translations were byte-identical across arms with identical corpus WER (0.089 in both), so the null on single-sentence output is a real measurement rather than an effect lost in noise. `tts_first_ms` drifted 1.075 in this run, wider than the other two: it is a 38–340 ms quantity, so a few tens of milliseconds of jitter is several percent. Cite the two tight controls, not that one.
+
+These figures replace an earlier, more pessimistic set (aggregate 0.985, `sv-multi` 0.851, `sv-long` 0.936). Three defects understated the effect and were fixed together: the proxy read the SSE stream in 1024-byte blocks and so withheld 4–5 tokens per flush; bench detected the first sentence with `endswith`, which only fires when a delta *ends* on punctuation, where the product uses `lastIndexOf`; and bench's default system prompt was still the retired 432-character JSON one, which put the long fixtures on the far side of the context cliff and inflated both arms' LLM times about threefold.
 
 **A trap for anyone adding another streaming measurement:** `requests.iter_lines(decode_unicode=True)` falls back to **ISO-8859-1** for a `text/*` response with no charset, and litert-lm's `text/event-stream` has none. That turns `är` into `Ã¤r` and, because mojibake is longer than the text it replaces, inflates the measured TTS time on non-ASCII output — it corrupts timings, not just strings. Set `response.encoding = "utf-8"` first; see `bench/runner._post_llm_streaming`. The browser was never affected, since `TextDecoder` defaults to UTF-8.
 
@@ -266,7 +290,7 @@ All three stage controls came in at 0.999 / 0.998 / 0.999 — the cleanest run o
 
 Every bench fixture is a short, single-utterance prompt: one to three sentences, 1.1–10.1s of audio, 17–171 characters of output. **Any optimization whose benefit scales with output length is systematically under-measured here.**
 
-That is not hypothetical — it has now happened three times. The GPU build (0.771 aggregate `llm_ms`, but 0.37 on the long fixtures), the shortened system prompt (same shape, same reason), and streaming (a null aggregate against 0.851 on the one multi-sentence fixture) all have their real effect concentrated in the fixtures the suite has fewest of.
+That is not hypothetical — it has now happened three times. The GPU build (0.771 aggregate `llm_ms`, but 0.37 on the long fixtures), the shortened system prompt (same shape, same reason), and streaming (a null aggregate against 0.760 on the one multi-sentence fixture) all have their real effect concentrated in the fixtures the suite has fewest of.
 
 Read every aggregate in `bench/results/` with that in mind, and add longer-output fixtures before concluding that a length-scaling optimization is worthless.
 
