@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 
-import React, { useState, useEffect, useRef, useCallback } from "react"
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import LanguageLane from "./components/LanguageLane"
-import ResponseDrawer from "./components/ResponseDrawer"
 import TranscriptView from "./components/TranscriptView"
 import Visualizer from "./components/Visualizer"
 import { useAudioRecorder } from "./hooks/useAudioRecorder"
@@ -29,57 +28,34 @@ import { playBlip } from "./utils/audio-blip"
 
 // Core orchestrator for the two-person kiosk translator.
 // Flow: hold a key → record mic (useAudioRecorder) → POST /api/stt (Whisper)
-// → LLM translation via /proxy (Gemma, strict-JSON prompt) → /api/tts playback.
+// → LLM translation via /proxy (Gemma) → /api/tts playback.
+// Listening / translating / text all live in the side-by-side transcript.
 
 // Languages offered on each lane's revolver; ttsLang selects the backend voice.
 const AVAILABLE_LANGUAGES = [
   { code: "sv", name: "Swedish", voice: "tts", ttsLang: "sv" },
   { code: "en", name: "English", voice: "tts", ttsLang: "en" },
   { code: "fi", name: "Finnish", voice: "tts", ttsLang: "fi" },
-  { code: "ar", name: "Arabic", voice: "tts", ttsLang: "ar" },
   { code: "es", name: "Spanish", voice: "tts", ttsLang: "es" },
-  { code: "ja", name: "Japanese", voice: "tts", ttsLang: "ja" },
-  { code: "zh", name: "Chinese", voice: "tts", ttsLang: "zh" },
-  { code: "ko", name: "Korean", voice: "tts", ttsLang: "ko" },
+  { code: "fr", name: "French", voice: "tts", ttsLang: "fr" },
 ]
-
-const languageName = (code) =>
-  AVAILABLE_LANGUAGES.find((l) => l.code === code)?.name || ""
-
-// How long the drawer lingers when TTS can't tell us playback has ended.
-const DRAWER_FALLBACK_MS = 4000
-
-// Drawer copy for the newest turn: placeholders stand in for the stages that
-// haven't landed yet.
-const drawerSourceText = (turn) => {
-  if (!turn) return ""
-  if (turn.status === "transcribing") return "Listening..."
-  if (turn.status === "error" && !turn.sourceText) return "(Transcription failed)"
-  return turn.sourceText
-}
-
-const drawerTargetText = (turn) => {
-  if (!turn) return ""
-  if (turn.status === "error") return `Error: ${turn.error}`
-  if (turn.status === "empty") return "(No speech detected)"
-  return turn.targetText || "Translating..."
-}
 
 function TranslatorApp({ config, clearConversationRef }) {
   // UI State
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false)
   const [activePerson, setActivePerson] = useState(1)
 
-  // Conversation State: append-only turns plus the language pair the columns
-  // locked to when the conversation started.
+  // Conversation State: append-only turns. Column headers track the current
+  // lane languages so a mid-conversation rotate still places text correctly.
   const [turns, setTurns] = useState([])
-  const [columns, setColumns] = useState(null)
   const nextTurnId = useRef(1)
+  // Turn created on keydown (listening); processTranslation fills it in.
+  const activeTurnIdRef = useRef(null)
+  // Lang pair captured at keydown for the active utterance — never re-read live
+  // lane indices after await (a rotate mid-pipeline must not retarget STT/TTS).
+  const activeUtteranceRef = useRef(null)
 
   // Currently-playing TTS audio element (chunked playback chain)
   const onlineAudioPlayerRef = useRef(null)
-  // Pending drawer auto-dismiss timer (fallback when TTS can't signal the end)
-  const dismissTimerRef = useRef(null)
 
   // Timestamps for latency measurement; reset on every key release.
   const timingRef = useRef(null)
@@ -89,13 +65,22 @@ function TranslatorApp({ config, clearConversationRef }) {
   const [lang2Index, setLang2Index] = useState(1)
   const [activeLaneRecording, setActiveLaneRecording] = useState(null) // 1 or 2
 
+  const columns = useMemo(
+    () => ({
+      left: {
+        code: AVAILABLE_LANGUAGES[lang1Index].code,
+        name: AVAILABLE_LANGUAGES[lang1Index].name,
+      },
+      right: {
+        code: AVAILABLE_LANGUAGES[lang2Index].code,
+        name: AVAILABLE_LANGUAGES[lang2Index].name,
+      },
+    }),
+    [lang1Index, lang2Index],
+  )
+
   const { isRecording, startRecording, stopRecording, analyser, micError } =
     useAudioRecorder()
-
-  // A mic failure takes over the drawer; it isn't a turn.
-  useEffect(() => {
-    if (micError) setIsDrawerOpen(true)
-  }, [micError])
 
   // Sentences waiting to be spoken. Each entry is { player, marks }: the Audio
   // element is already constructed (creating it starts the fetch, so queued
@@ -103,7 +88,7 @@ function TranslatorApp({ config, clearConversationRef }) {
   // object that was current when the chunk was queued.
   //
   // `sealed` is what lets an asynchronously-drained queue still honour the
-  // drawer's onFinished(played) contract: mid-stream an empty queue only means
+  // onFinished(played) contract: mid-stream an empty queue only means
   // the next sentence hasn't been generated yet, so "finished" is *sealed and
   // drained with nothing playing*. `onFinished` fires exactly once per session.
   const ttsQueueRef = useRef({
@@ -152,30 +137,7 @@ function TranslatorApp({ config, clearConversationRef }) {
     [updateTurn],
   )
 
-  const clearDismissTimer = useCallback(() => {
-    if (dismissTimerRef.current) {
-      clearTimeout(dismissTimerRef.current)
-      dismissTimerRef.current = null
-    }
-  }, [])
-
-  useEffect(() => clearDismissTimer, [clearDismissTimer])
-
-  const closeDrawer = useCallback(() => {
-    clearDismissTimer()
-    setIsDrawerOpen(false)
-  }, [clearDismissTimer])
-
-  // Fallback dismissal for when no TTS playback marks the end of the exchange.
-  const closeDrawerAfterDelay = useCallback(() => {
-    clearDismissTimer()
-    dismissTimerRef.current = setTimeout(() => {
-      dismissTimerRef.current = null
-      setIsDrawerOpen(false)
-    }, DRAWER_FALLBACK_MS)
-  }, [clearDismissTimer])
-
-  // Hand the drawer its one and only verdict for the current session.
+  // Hand the session its one and only verdict for the current playback.
   const settleTTS = useCallback((played) => {
     const queue = ttsQueueRef.current
     const onFinished = queue.onFinished
@@ -193,7 +155,7 @@ function TranslatorApp({ config, clearConversationRef }) {
       onlineAudioPlayerRef.current = null
     }
     // Nothing will ever drain now — a superseded or torn-down session reports
-    // played=false rather than leaving the drawer waiting forever.
+    // played=false rather than leaving onFinished hanging forever.
     settleTTS(false)
   }, [settleTTS])
 
@@ -291,6 +253,38 @@ function TranslatorApp({ config, clearConversationRef }) {
     [lang1Index, lang2Index, isRecording],
   )
 
+  // Mark a turn cancelled if it is still waiting on STT/LLM — used when a
+  // newer recording supersedes it, or when processTranslation early-returns
+  // after !isCurrent() so the row never stays on "listening"/"translating".
+  const cancelTurnIfPending = useCallback(
+    (id) => {
+      if (id == null) return
+      setTurns((prev) =>
+        prev.map((t) =>
+          t.id === id &&
+          (t.status === "transcribing" || t.status === "translating")
+            ? { ...t, status: "cancelled", error: null }
+            : t,
+        ),
+      )
+    },
+    [],
+  )
+
+  // Drop a turn that never left listening/transcribing (empty capture, clear
+  // during getUserMedia, superseded before processTranslation starts).
+  const abandonActiveTurn = useCallback(
+    (turnId) => {
+      cancelTurnIfPending(turnId)
+      setActiveLaneRecording(null)
+      if (activeTurnIdRef.current === turnId) activeTurnIdRef.current = null
+      if (activeUtteranceRef.current?.turnId === turnId) {
+        activeUtteranceRef.current = null
+      }
+    },
+    [cancelTurnIfPending],
+  )
+
   // Recording triggers
   const handleRecordStart = useCallback(
     async (lane) => {
@@ -299,11 +293,13 @@ function TranslatorApp({ config, clearConversationRef }) {
       // alone is not enough: its stream keeps arriving, and every new sentence
       // would find an empty queue and start playing over the new recording.
       generationRef.current += 1
+      const generation = generationRef.current
       if (inflightRef.current) inflightRef.current.abort()
       stopSpeaking()
-      // Drop any dismissal left over from the previous exchange so timers
-      // from consecutive recordings can't stack up and close the new one.
-      clearDismissTimer()
+      // isRecording is still false while getUserMedia is in flight, so a second
+      // key (Z→X) can enter here. stopRecording sets stopRequestedRef so the
+      // in-flight start aborts instead of leaving the mic live orphaned.
+      void stopRecording()
 
       setActivePerson((prev) => {
         if (prev !== lane) playBlip("speaker")
@@ -312,96 +308,163 @@ function TranslatorApp({ config, clearConversationRef }) {
       setActiveLaneRecording(lane)
       playBlip("ping")
 
+      const src =
+        lane === 1
+          ? AVAILABLE_LANGUAGES[lang1Index]
+          : AVAILABLE_LANGUAGES[lang2Index]
+      const dst =
+        lane === 1
+          ? AVAILABLE_LANGUAGES[lang2Index]
+          : AVAILABLE_LANGUAGES[lang1Index]
+
+      // Open the turn immediately so the transcript shows "listening" while
+      // the key is held — not only after release. Cancel any still-pending
+      // previous rows in the same update so they never stick on listening.
+      const turnId = nextTurnId.current++
+      activeTurnIdRef.current = turnId
+      // Capture generation with the lang pair so clear / a newer hold can
+      // invalidate this utterance while startRecording is still awaiting.
+      activeUtteranceRef.current = { turnId, lane, src, dst, generation }
+      setTurns((prev) => [
+        ...prev.map((t) =>
+          t.status === "transcribing" || t.status === "translating"
+            ? { ...t, status: "cancelled", error: null }
+            : t,
+        ),
+        {
+          id: turnId,
+          lane,
+          sourceLang: src.code,
+          targetLang: dst.code,
+          sourceText: "",
+          targetText: "",
+          status: "transcribing",
+          error: null,
+          meta: "",
+        },
+      ])
+
       const result = await startRecording()
+      if (generationRef.current !== generation) {
+        // Another hold / clear bumped generation while getUserMedia ran — tear
+        // down the capture the same way clear does, or the mic stays live with
+        // activeUtteranceRef already cleared.
+        abandonActiveTurn(turnId)
+        void stopRecording()
+        return
+      }
       if (result === false || result == null) {
-        setActiveLaneRecording(null)
+        // Early key release during getUserMedia, mic failure, or a superseding
+        // start that hit startingRef — do not invent "Microphone failed". Real
+        // mic errors still surface via the micError banner from the hook.
+        // Always stopRecording: a Z→X race can leave the first capture live
+        // after this start failed on startingRef.
+        abandonActiveTurn(turnId)
+        void stopRecording()
         return
       }
       // startRecording may return audio directly if Z was released during mic setup.
       if (result !== true && result.base64Data) {
         setActiveLaneRecording(null)
-        processTranslation(lane, result.base64Data)
+        processTranslation(lane, result.base64Data, turnId, src, dst, generation)
       }
     },
-    [isRecording, stopSpeaking, startRecording, clearDismissTimer],
+    [
+      isRecording,
+      stopSpeaking,
+      startRecording,
+      stopRecording,
+      lang1Index,
+      lang2Index,
+      abandonActiveTurn,
+    ],
   )
 
   const handleRecordStop = useCallback(async () => {
     timingRef.current = { keyup: performance.now() }
     const recordedLane = activeLaneRecording
+    const turnId = activeTurnIdRef.current
+    const utterance = activeUtteranceRef.current
+    const generation = utterance?.generation
+    const src = utterance?.turnId === turnId ? utterance.src : null
+    const dst = utterance?.turnId === turnId ? utterance.dst : null
     const audioData = await stopRecording()
-    if (!audioData) return
+    // Missing keydown binding (superseded / abandoned mid-start) or a newer
+    // generation — do not start STT, and never claim generationRef.current.
+    if (
+      generation == null ||
+      turnId == null ||
+      !src ||
+      !dst ||
+      generationRef.current !== generation
+    ) {
+      abandonActiveTurn(turnId)
+      return
+    }
+    if (!audioData) {
+      // Empty capture after the graph was up — cancel rather than leave the
+      // keydown turn stuck on "listening".
+      abandonActiveTurn(turnId)
+      return
+    }
     setActiveLaneRecording(null)
-    processTranslation(recordedLane, audioData.base64Data)
-  }, [activeLaneRecording, stopRecording])
+    processTranslation(
+      recordedLane,
+      audioData.base64Data,
+      turnId,
+      src,
+      dst,
+      generation,
+    )
+  }, [activeLaneRecording, stopRecording, abandonActiveTurn])
 
-  // Translation Pipeline
-  const processTranslation = async (lane, base64Data) => {
-    // This utterance owns the generation handleRecordStart bumped for it, and
-    // its own marks object. Both are captured once: everything below asks
-    // "am I still the current utterance?" rather than reading live state.
-    const generation = generationRef.current
+  // Translation Pipeline. `turnId` / `src` / `dst` / `generation` must come
+  // from the keydown utterance — never invent a turn or fall back to live
+  // lane indices / generationRef (a post-supersede keyup used to claim the
+  // new generation and run STT/TTS with no active utterance).
+  const processTranslation = async (
+    lane,
+    base64Data,
+    turnId,
+    src,
+    dst,
+    generation,
+  ) => {
+    if (
+      generation == null ||
+      turnId == null ||
+      !src ||
+      !dst ||
+      generationRef.current !== generation
+    ) {
+      cancelTurnIfPending(turnId)
+      return
+    }
     const marks = timingRef.current
     const isCurrent = () => generationRef.current === generation
     const controller = new AbortController()
     inflightRef.current = controller
 
-    setIsDrawerOpen(true)
-    clearDismissTimer()
-
-    const src =
-      lane === 1
-        ? AVAILABLE_LANGUAGES[lang1Index]
-        : AVAILABLE_LANGUAGES[lang2Index]
-    const dst =
-      lane === 1
-        ? AVAILABLE_LANGUAGES[lang2Index]
-        : AVAILABLE_LANGUAGES[lang1Index]
-
-    const turnId = nextTurnId.current++
     // Bind the marks to this turn so the latency line lands on the turn that
     // produced it, even if a later chunk is what finally reports it.
     if (marks) marks.turnId = turnId
-    setTurns((prev) => [
-      ...prev,
-      {
-        id: turnId,
-        lane,
-        sourceLang: src.code,
-        targetLang: dst.code,
-        sourceText: "",
-        targetText: "",
-        status: "transcribing",
-        error: null,
-        meta: "",
-      },
-    ])
+    if (activeTurnIdRef.current === turnId) activeTurnIdRef.current = null
 
-    // The columns lock to the pair in play at the first turn and never move.
-    setColumns((prev) =>
-      prev
-        ? prev
-        : {
-            left: {
-              code: AVAILABLE_LANGUAGES[lang1Index].code,
-              name: AVAILABLE_LANGUAGES[lang1Index].name,
-            },
-            right: {
-              code: AVAILABLE_LANGUAGES[lang2Index].code,
-              name: AVAILABLE_LANGUAGES[lang2Index].name,
-            },
-          },
-    )
+    const dropIfSuperseded = () => {
+      cancelTurnIfPending(turnId)
+    }
 
     try {
       // 1. Transcription
       const transcribedText = await transcribeAudio(base64Data, src.code)
-      if (!isCurrent()) return
+      if (!isCurrent()) {
+        dropIfSuperseded()
+        return
+      }
       if (marks) marks.stt = performance.now()
 
       if (!transcribedText.trim()) {
         updateTurn(turnId, { status: "empty" })
-        closeDrawerAfterDelay()
         return
       }
 
@@ -410,21 +473,12 @@ function TranslatorApp({ config, clearConversationRef }) {
         status: "translating",
       })
 
-      // The drawer hands over to the transcript once the translation has been
-      // spoken; without playback a timer stands in for that beat. Playback is
-      // now a queue that drains across several sentences, so "spoken" is the
-      // moment the sealed queue runs dry — one hand-off, not one per chunk.
+      // Playback settles once; we only need it for latency reporting now that
+      // the transcript is the sole UI surface.
       if (config.enableTts) {
         beginTTSSession((played) => {
-          // A superseded session still settles, but by then the drawer belongs
-          // to the newer utterance and must be left alone.
           if (!isCurrent()) return
-          if (played) {
-            closeDrawer()
-          } else {
-            reportLatency(marks, false)
-            closeDrawerAfterDelay()
-          }
+          if (!played) reportLatency(marks, false)
         })
       }
 
@@ -460,7 +514,7 @@ function TranslatorApp({ config, clearConversationRef }) {
         },
         (partial) => {
           if (!isCurrent()) return
-          // First token, not "response complete": this is what the drawer's
+          // First token, not "response complete": this is what the latency
           // LLM figure means, and it is the only LLM mark that exists before
           // sentence one starts playing.
           if (marks && !marks.llm) marks.llm = performance.now()
@@ -470,7 +524,10 @@ function TranslatorApp({ config, clearConversationRef }) {
         controller.signal,
       )
 
-      if (!isCurrent()) return
+      if (!isCurrent()) {
+        dropIfSuperseded()
+        return
+      }
       if (marks && !marks.llm) marks.llm = performance.now()
       // The streamed text and the parsed translation are only the same string
       // when the model answered in plain text. If they differ — a legacy JSON
@@ -484,32 +541,34 @@ function TranslatorApp({ config, clearConversationRef }) {
       // på sätts latensraden av reportLatency när ljudet börjar spela; utan
       // TTS spelas inget, så den skrivs här i stället för att aldrig skrivas.
       if (!config.enableTts) reportLatency(marks, false)
-      // No more sentences are coming: from here on, an empty queue means the
-      // translation has been spoken, and draining hands the drawer over to the
-      // transcript. Without TTS there is no playback to hand over, so the
-      // fallback timer stands in for that beat.
       if (config.enableTts) sealTTSQueue()
-      else closeDrawerAfterDelay()
     } catch (err) {
-      if (err.name === "AbortError" || !isCurrent()) return
+      if (err.name === "AbortError" || !isCurrent()) {
+        dropIfSuperseded()
+        return
+      }
       console.error(err)
       updateTurn(turnId, { status: "error", error: err.message })
-      // Nothing further will be queued; already-queued audio may still finish
-      // and close the drawer early, and the timer closes it otherwise.
       sealTTSQueue()
-      closeDrawerAfterDelay()
     } finally {
       if (inflightRef.current === controller) inflightRef.current = null
     }
   }
 
-  // Wipe the conversation; clearing columns lets a fresh language pair lock.
+  // Wipe the conversation and stop anything still in flight so a late STT/LLM
+  // completion cannot enqueue TTS after clear.
   const handleClearConversation = useCallback(() => {
+    generationRef.current += 1
+    if (inflightRef.current) inflightRef.current.abort()
+    inflightRef.current = null
+    activeTurnIdRef.current = null
+    activeUtteranceRef.current = null
     stopSpeaking()
+    // End a pending getUserMedia / active capture so handleRecordStart's await
+    // and handleRecordStop do not proceed into STT after the wipe.
+    void stopRecording()
     setTurns([])
-    setColumns(null)
-    closeDrawer()
-  }, [stopSpeaking, closeDrawer])
+  }, [stopSpeaking, stopRecording])
 
   // The settings overlay lives in App.jsx but the conversation lives here, so
   // App borrows the handler through a ref rather than us lifting the state up.
@@ -599,40 +658,9 @@ function TranslatorApp({ config, clearConversationRef }) {
     handleRotateLanguage,
   ])
 
-  // The drawer is a view of the newest turn, not state of its own.
-  const latestTurn = turns[turns.length - 1] ?? null
-
-  const drawerProps = micError
-    ? {
-        transcriptionSource: "Microphone",
-        transcriptionText: "Access Failed",
-        translationTarget: "Error",
-        translationText: `${micError} (HTTPS is required when accessing from remote devices)`,
-        metaText: "",
-      }
-    : {
-        transcriptionSource: latestTurn
-          ? `${languageName(latestTurn.sourceLang)} (Source)`
-          : "",
-        transcriptionText: drawerSourceText(latestTurn),
-        translationTarget: latestTurn
-          ? `${languageName(latestTurn.targetLang)} (Translation)`
-          : "",
-        translationText: drawerTargetText(latestTurn),
-        metaText: latestTurn?.meta ?? "",
-      }
-
   return (
     <div className="translator-envelope">
-      {/* Transcript and drawer share the envelope's first grid row; the drawer
-          overlays the transcript rather than displacing it. */}
-      <TranscriptView turns={turns} columns={columns} />
-
-      <ResponseDrawer
-        isActive={isDrawerOpen}
-        onClose={closeDrawer}
-        {...drawerProps}
-      />
+      <TranscriptView turns={turns} columns={columns} micError={micError} />
 
       <main className="translator-workspace">
         <div className="languages-container">

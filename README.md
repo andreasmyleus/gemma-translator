@@ -9,7 +9,7 @@ https://github.com/user-attachments/assets/343072ce-dc78-44a7-a783-99312845cabe
 ## Features
 
 - **On-Device Inference**: Uses LiteRT-LM to run the `gemma4-e2b` model entirely locally. No internet required after setup.
-- **Nordic Languages**: Swedish and Finnish are supported alongside the original six (see [Languages](#languages)).
+- **Languages**: Swedish, English, Finnish, Spanish, and French. STT and TTS are routed per language; translation uses one shared Gemma (see [Languages](#languages)).
 - **Voice Interface**: Captures microphone audio, processes it, and sends it to the local model.
 - **Optimized UI**: Retro-terminal styling custom-built for small hardware screens (like Raspberry Pi displays).
 - **Unified Startup**: One script to launch the LLM server, the Python API, and the React frontend.
@@ -68,26 +68,32 @@ The application will be accessible at:
 
 ## Languages
 
-The lanes default to **Swedish** and **English**; rotate to Finnish, Arabic, Spanish, Japanese, Chinese, or Korean with the arrow keys. Each leg of the pipeline runs one engine:
+The lanes default to **Swedish** and **English**; rotate to Finnish, Spanish, or French with the arrow keys. Speech in/out is routed per language; translation always goes through one shared Gemma.
 
 | Step | Engine |
 | :--- | :--- |
-| Speech recognition (all languages) | faster-whisper (`small`, int8 CPU) |
-| Translation (all languages) | Gemma 4 E2B via LiteRT-LM |
-| Speech synthesis (all but `ja`) | Piper |
-| Speech synthesis (`ja`) | moonshine-voice (Kokoro) |
+| Speech recognition (Swedish) | [KB-Whisper small](https://huggingface.co/KBLab/kb-whisper-small) via faster-whisper (int8 CPU) |
+| Speech recognition (Finnish) | [mpasila/faster-whisper-medium-finnish](https://huggingface.co/mpasila/faster-whisper-medium-finnish) (CT2 of Finnish-NLP medium; int8 CPU) |
+| Speech recognition (en/es/fr) | faster-whisper multilingual `small` (int8 CPU) |
+| Translation (all languages) | Gemma 4 E2B via LiteRT-LM (shared) |
+| Speech synthesis | Piper (one voice per language) |
 
-The backend pre-warms the models for both default lanes at startup, so the first server start downloads the Whisper and Piper models (~500MB combined) into `~/.cache/huggingface` and `~/.local/share/piper-voices`. Everything runs offline afterwards. Two environment variables tune this:
+No edge-sized CT2 fine-tune is wired for Spanish or French by default: Hub has third-party small CT2 exports (e.g. HiTZ/zuazo Spanish, bofenghuang French), but `bench/fixtures.json` has no `es-*`/`fr-*` audio to measure them against stock, and Pi 5 / 8GB already keeps `MAX_MODELS=2` (KB-sv + multilingual small) for the default lanes — so those langs stay on multilingual `small` unless you override. Finnish-NLP’s small is transformers-only; their shipped CT2 is large-v3, which is skipped as a default. English stays on multilingual `small`.
 
-- `WHISPER_MODEL_SIZE`: Whisper checkpoint (default `small`). `medium` is noticeably more accurate on Swedish and Finnish but roughly 3x slower. Any faster-whisper-compatible model ID works, including Swedish-tuned ones such as `KBLab/kb-whisper-medium`.
+The backend keeps at most two STT checkpoints and two Piper voices in memory (`MAX_MODELS=2`), lazily loading and LRU-evicting as lanes rotate. Default lanes (`sv`/`en`) are pre-warmed at startup, which loads two Whisper checkpoints (KB-Whisper for Swedish and multilingual `small` for English). First start downloads the models into `~/.cache/huggingface` and `~/.local/share/piper-voices`; everything runs offline afterwards. Environment variables:
+
+- `WHISPER_MODEL_SIZE`: default multilingual Whisper checkpoint (default `small`).
+- `STT_MODEL_SV`: Swedish STT checkpoint (default `KBLab/kb-whisper-small`). Set to `small` to A/B against stock Whisper.
+- `STT_MODEL_FI`: Finnish STT checkpoint (default `mpasila/faster-whisper-medium-finnish`).
+- `STT_MODEL_ES` / `STT_MODEL_FR`: optional Spanish/French checkpoints (default multilingual `small`).
 - `PIPER_VOICE_DIR`: where Piper voices are stored (default `~/.local/share/piper-voices`).
 
 ### Adding a language
 
 1. Add it to `AVAILABLE_LANGUAGES` in `frontend/src/TranslatorApp.jsx`.
-2. In `backend/server.py`, add its code to `SUPPORTED_STT_LANGS` (Whisper covers ~99 languages; an unlisted code is auto-detected instead) and to `PIPER_VOICE_MAP`, picking a voice ID from `piper.download_voices.list_voices()`.
+2. In `backend/server.py`, add its code to `SUPPORTED_STT_LANGS` and `PIPER_VOICE_MAP` (pick a voice from `piper.download_voices.list_voices()`). Optionally add a specialised Whisper id to `STT_MODEL_MAP`.
 
-Piper covers 54 languages but has no Japanese voice, which is the one case still routed to moonshine-voice via `TTS_LANG_MAP`. Any other language Piper lacks needs the same treatment, or a different engine.
+Piper covers 54 languages. A language Piper lacks needs a different TTS engine wired the same way the old Japanese moonshine path was.
 
 ## Benchmarking
 
