@@ -21,9 +21,11 @@ fäller, så en körning kan användas som grind i ett skript.
 """
 
 import argparse
+import errno
 import json
 import os
 import pathlib
+import socket
 import subprocess
 import sys
 import time
@@ -31,7 +33,7 @@ import time
 import requests
 
 from bench.fixtures import load_fixtures
-from bench.frontend_mirror import system_prompt, system_prompt_plain
+from bench.frontend_mirror import DEFAULT_PROMPT, PROMPT_VARIANTS
 from bench.report import (
     aggregate_paired_ratios,
     build_report,
@@ -49,10 +51,37 @@ RESULTS_DIR = BENCH_DIR / "results"
 
 BACKEND_STARTUP_TIMEOUT = 180
 
-# Namngivna promptvarianter för --ab-prompt. Arm A använder alltid
-# system_prompt (den oförändrade JSON-wrappern); nyckeln här väljer vad
-# arm B använder i stället.
-PROMPT_VARIANTS = {"plain": system_prompt_plain}
+
+def assert_port_free(port):
+    """Fäller om något redan lyssnar på `port`.
+
+    Utan den här kontrollen är beredskapstestet i `start_backend` nöjt med
+    *vem som helst* som svarar — inklusive en kvarglömd backend från en tidigare
+    körning — medan den nystartade barnprocessen tyst dör på "Address already in
+    use". Konsekvensen är värre än ett krasch: arm B skulle då köras mot arm A:s
+    process, med arm A:s miljö, och varje parvis kvot blir ~1,000. Det är exakt
+    samma siffra som "optimeringen har ingen effekt", vilket är den vanligaste
+    slutsatsen i den här kampanjen — alltså ett fel som ser ut som ett resultat.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Samma SO_REUSEADDR som backendens TCPServer sätter. Utan den fäller
+    # kontrollen på TIME_WAIT-rester från nyss stängda anslutningar, alltså på
+    # en port barnet mycket väl hade kunnat binda. En aktiv lyssnare stoppar
+    # bindningen ändå — SO_REUSEADDR tillåter inte det, bara SO_REUSEPORT gör.
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        probe.bind(("127.0.0.1", port))
+    except OSError as err:
+        if err.errno in (errno.EADDRINUSE, errno.EACCES):
+            raise SystemExit(
+                f"Porten {port} är upptagen. bench startar en egen backend där och "
+                f"kan inte mäta mot någon annans process — kvoterna skulle bli ~1,000 "
+                f"och se ut som 'ingen effekt'. Stoppa det som lyssnar "
+                f"(lsof -nP -iTCP:{port} -sTCP:LISTEN) eller välj en annan --api-port."
+            ) from err
+        raise
+    finally:
+        probe.close()
 
 
 def start_backend(port, extra_env=None):
@@ -61,6 +90,7 @@ def start_backend(port, extra_env=None):
     `extra_env` läggs ovanpå den ärvda miljön, t.ex. `{"STT_VAD": "1"}` för
     arm B i en A/B-körning. Arm A får den oförändrade miljön.
     """
+    assert_port_free(port)
     env = dict(os.environ, PORT=str(port), PYTHONUNBUFFERED="1")
     if extra_env:
         env.update(extra_env)
@@ -82,9 +112,18 @@ def start_backend(port, extra_env=None):
         try:
             # /api/tts utan text ger 400 — vilket räcker som bevis på att den lyssnar.
             requests.get(f"http://localhost:{port}/api/tts", timeout=2)
-            return process
         except requests.RequestException:
             time.sleep(1)
+            continue
+        # Porten var fri innan vi startade, så den som svarar nu är vårt barn —
+        # om barnet fortfarande lever. Dog det i stället under uppstarten har
+        # någon annan hunnit ta porten emellan, och då mäter vi fel process.
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"Backend på {port} dog under uppstarten men porten svarar — "
+                f"någon annan äger socketen. Se {log_path}"
+            )
+        return process
     process.terminate()
     raise RuntimeError(f"Backend svarade inte inom {BACKEND_STARTUP_TIMEOUT}s, se {log_path}")
 
@@ -125,9 +164,10 @@ def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None, stream_b=False)
     det.
 
     `prompt_variant` väljer arm B:s systemprompt (`--ab-prompt`, en nyckel i
-    PROMPT_VARIANTS, t.ex. "plain"). Skild av samma skäl som `model_b`:
+    PROMPT_VARIANTS, t.ex. "json"). Skild av samma skäl som `model_b`:
     prompten byggs i bench:s egen process av frontend_mirror.system_prompt,
-    inte av backend-processens miljö, så `--ab` kan inte uttrycka det.
+    inte av backend-processens miljö, så `--ab` kan inte uttrycka det. Arm A
+    kör `--prompt` (default "plain", alltså produktens egen prompt).
 
     `stream_b` väljer om arm B strömmar LLM-svaret (`--ab-stream`). Skild av
     samma skäl som `model_b`/`prompt_variant`: strömning är en runner-nivå-
@@ -140,12 +180,13 @@ def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None, stream_b=False)
     api_base_a = f"http://localhost:{args.api_port}"
     api_base_b = f"http://localhost:{args.api_port + 1}"
     llm_url = f"http://localhost:{args.llm_port}/v1/chat/completions"
-    prompt_fn_b = PROMPT_VARIANTS[prompt_variant] if prompt_variant else system_prompt
+    prompt_fn_a = PROMPT_VARIANTS[args.prompt]
+    prompt_fn_b = PROMPT_VARIANTS[prompt_variant] if prompt_variant else prompt_fn_a
 
     backend_a = start_backend(args.api_port)
     backend_b = start_backend(args.api_port + 1, extra_env=ab_env)
     try:
-        warmup(api_base_a, llm_url, args.model, fixtures)
+        warmup(api_base_a, llm_url, args.model, fixtures, prompt_fn=prompt_fn_a)
         # Arm B värms med model_b, inte args.model — annars laddar litert-lm
         # fortfarande CPU-modellen i uppvärmningen och arm B:s första mätta
         # repetition bär GPU-buildens ~7 s vikt-laddningskostnad i stället.
@@ -164,7 +205,7 @@ def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None, stream_b=False)
                 for arm in order:
                     base = api_base_a if arm == "a" else api_base_b
                     model = args.model if arm == "a" else model_b
-                    prompt_fn = system_prompt if arm == "a" else prompt_fn_b
+                    prompt_fn = prompt_fn_a if arm == "a" else prompt_fn_b
                     stream = False if arm == "a" else stream_b
                     result = run_fixture(base, llm_url, model, fixture_id, spec, prompt_fn, stream=stream)
                     (runs_a if arm == "a" else runs_b).append(result)
@@ -188,8 +229,22 @@ def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None, stream_b=False)
         backend_b.wait(timeout=30)
         print("[bench] Backends stoppade.", flush=True)
 
-    report_a = build_report(f"{args.label}-a", per_fixture_a)
-    report_b = build_report(f"{args.label}-b", per_fixture_b)
+    report_a = build_report(
+        f"{args.label}-a",
+        per_fixture_a,
+        {"model": args.model, "prompt": args.prompt, "stream": False, "repeats": args.repeats},
+    )
+    report_b = build_report(
+        f"{args.label}-b",
+        per_fixture_b,
+        {
+            "model": model_b,
+            "prompt": prompt_variant or args.prompt,
+            "stream": stream_b,
+            "repeats": args.repeats,
+            "env": dict(ab_env or {}),
+        },
+    )
     drift = aggregate_paired_ratios(paired)
     report = {
         "label": args.label,
@@ -197,8 +252,8 @@ def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None, stream_b=False)
         "ab_env": ab_env,
         "model_a": args.model,
         "model_b": model_b,
-        "prompt_a": "json",
-        "prompt_b": prompt_variant or "json",
+        "prompt_a": args.prompt,
+        "prompt_b": prompt_variant or args.prompt,
         "stream_a": False,
         "stream_b": stream_b,
         "arm_a": report_a,
@@ -217,7 +272,7 @@ def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None, stream_b=False)
     if model_b != args.model:
         ab_note["model"] = f"{args.model} -> {model_b}"
     if prompt_variant:
-        ab_note["prompt"] = f"json -> {prompt_variant}"
+        ab_note["prompt"] = f"{args.prompt} -> {prompt_variant}"
     if stream_b:
         ab_note["stream"] = "off -> on"
     print(render_markdown_ab(args.label, paired, drift, ab_note))
@@ -261,11 +316,21 @@ def main():
         ),
     )
     parser.add_argument(
+        "--prompt",
+        choices=sorted(PROMPT_VARIANTS),
+        default=DEFAULT_PROMPT,
+        help=(
+            "Systemprompt att mäta med (arm A i A/B-läge). Default \"plain\", "
+            "vilket är den prompt produkten faktiskt skickar. \"json\" är den "
+            "gamla wrapper-prompten, kvar för att kunna reproducera Task 12."
+        ),
+    )
+    parser.add_argument(
         "--ab-prompt",
         choices=sorted(PROMPT_VARIANTS),
         help=(
             "Kör en parvis A/B-mätning där arm B använder en annan systemprompt "
-            "än arm A, t.ex. \"plain\". Skild från --ab: prompten byggs i "
+            "än arm A, t.ex. \"json\". Skild från --ab: prompten byggs i "
             "bench:s egen process (frontend_mirror.system_prompt), inte av "
             "backend-processens miljö eller modell-id:t, så varken --ab eller "
             "--ab-model kan uttrycka den här ändringen — bara den startas i sitt "
@@ -319,6 +384,26 @@ def main():
         raise SystemExit(
             "--ab-stream och --compare kan inte kombineras, av samma skäl som --ab."
         )
+    if args.stream and (args.ab or args.ab_model or args.ab_prompt or args.ab_stream):
+        # run_ab låser arm A till icke-strömmande (det är jämförelseläget), så
+        # ett --stream här hade tyst ignorerats för arm A och bara råkat
+        # sammanfalla med --ab-stream för arm B.
+        raise SystemExit(
+            "--stream gäller bara enarmsläget. I A/B-läge är arm A per definition "
+            "det oförändrade läget (icke-strömmande) — använd --ab-stream för att "
+            "låta arm B strömma."
+        )
+    if args.repeats < 1:
+        raise SystemExit("--repeats måste vara minst 1.")
+    if args.repeats % 2 == 0:
+        # ABBA-varvningen börjar med A i repetition 0, och just den kastas som
+        # uppvärmning. Med ett jämnt antal blir de mätta repetitionerna udda
+        # till antalet och den ena armen får en ordningsposition mer än den
+        # andra, alltså en systematisk ordningseffekt på en av armarna.
+        raise SystemExit(
+            f"--repeats måste vara udda (fick {args.repeats}): den första "
+            f"repetitionen kastas, och ett jämnt antal ger obalanserad ABBA-varvning."
+        )
 
     fixtures = load_fixtures()
     if args.fixtures:
@@ -342,15 +427,19 @@ def main():
 
     baseline = load_result(args.compare) if args.compare else None
 
+    prompt_fn = PROMPT_VARIANTS[args.prompt]
+
     backend = start_backend(args.api_port)
     try:
-        warmup(api_base, llm_url, args.model, fixtures, stream=args.stream)
+        warmup(api_base, llm_url, args.model, fixtures, prompt_fn=prompt_fn, stream=args.stream)
 
         per_fixture = {}
         for fixture_id, spec in fixtures.items():
             runs = []
             for attempt in range(args.repeats):
-                result = run_fixture(api_base, llm_url, args.model, fixture_id, spec, stream=args.stream)
+                result = run_fixture(
+                    api_base, llm_url, args.model, fixture_id, spec, prompt_fn, stream=args.stream
+                )
                 marker = " (uppvärmning, kastas)" if attempt == 0 else ""
                 status = "ok" if result.ok else f"FEL {result.error}"
                 print(
@@ -367,7 +456,17 @@ def main():
         backend.wait(timeout=30)
         print("[bench] Backend stoppad.", flush=True)
 
-    report = build_report(args.label, per_fixture)
+    report = build_report(
+        args.label,
+        per_fixture,
+        {
+            "model": args.model,
+            "prompt": args.prompt,
+            "stream": args.stream,
+            "repeats": args.repeats,
+            "fixtures": sorted(fixtures),
+        },
+    )
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = RESULTS_DIR / f"{args.label}.json"
     with output_path.open("w", encoding="utf-8") as handle:

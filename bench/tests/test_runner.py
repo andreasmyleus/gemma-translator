@@ -12,9 +12,83 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import unittest
+from unittest import mock
 
+from bench import runner
 from bench.runner import RunResult
+
+
+def sse(**choice):
+    return "data: " + json.dumps({"choices": [choice]})
+
+
+class FakeResponse:
+    """Precis så mycket av requests.Response som _post_llm_streaming rör."""
+
+    def __init__(self, lines):
+        self._lines = lines
+        self.encoding = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+    def iter_lines(self, decode_unicode=False):
+        return iter(self._lines)
+
+
+def run_streaming(lines):
+    with mock.patch.object(runner.requests, "post", return_value=FakeResponse(lines)):
+        return runner._post_llm_streaming(
+            "http://api", "http://llm", "gemma4-e2b", "hej", "sv", "en"
+        )
+
+
+class TestStreamCompleteness(unittest.TestCase):
+    """En avbruten ström ger halv översättning MEN korta tider — en falsk vinst
+    som annars bokförs som en lyckad, snabb körning."""
+
+    def test_complete_stream_is_accepted(self):
+        translation, total_ms, first_ms = run_streaming(
+            [
+                sse(delta={"content": "Hi."}),
+                sse(delta={"content": " There."}),
+                sse(delta={}, finish_reason="stop"),
+                "data: [DONE]",
+            ]
+        )
+        self.assertEqual(translation, "Hi. There.")
+        self.assertGreater(total_ms, 0)
+        self.assertLessEqual(first_ms, total_ms)
+
+    def test_stream_without_done_but_with_finish_reason_is_accepted(self):
+        translation, _, _ = run_streaming(
+            [sse(delta={"content": "Hi."}), sse(delta={}, finish_reason="stop")]
+        )
+        self.assertEqual(translation, "Hi.")
+
+    def test_truncated_stream_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "trunkerat"):
+            run_streaming([sse(delta={"content": "Hi. Half a sen"})])
+
+    def test_first_sentence_is_detected_positionally(self):
+        # Deltat slutar mitt i mening två; en endswith-detektor hade missat den
+        # första meningen helt och rapporterat first_sentence == total.
+        _, total_ms, first_ms = run_streaming(
+            [
+                sse(delta={"content": "Hi. And th"}),
+                sse(delta={"content": "en some more text here."}),
+                "data: [DONE]",
+            ]
+        )
+        self.assertLess(first_ms, total_ms)
 
 
 class TestTimeToFirstAudio(unittest.TestCase):

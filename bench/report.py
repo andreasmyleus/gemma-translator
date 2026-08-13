@@ -77,7 +77,14 @@ def summarize(results, spec_text):
     return summary
 
 
-def build_report(label, per_fixture):
+def build_report(label, per_fixture, config=None):
+    """`config` är körningens provenance (modell, prompt, strömning).
+
+    Utan den går två resultatfiler inte att skilja åt i konfiguration —
+    `baseline.json` och `final.json` såg identiska ut trots att de mättes med
+    olika systemprompt. `render_markdown` använder den också för att vägra
+    rita en Δ-kolumn mellan körningar som inte mätte samma sak.
+    """
     ok_fixtures = [data for data in per_fixture.values() if data["ok"]]
     # En fixtur utan facitord går inte att poängsätta: dess `edits` är bara
     # längden på transkriptionen och saknar nämnare. Räknades den med skulle
@@ -88,7 +95,7 @@ def build_report(label, per_fixture):
     total_edits = sum(data["edits"] for data in scored)
     total_words = sum(data["ref_words"] for data in scored)
     overall = [data["time_to_first_audio_ms"]["median"] for data in ok_fixtures]
-    return {
+    report = {
         "label": label,
         "fixtures": per_fixture,
         "median_time_to_first_audio_ms": median(overall),
@@ -96,6 +103,33 @@ def build_report(label, per_fixture):
         "corpus_edits": total_edits,
         "corpus_ref_words": total_words,
     }
+    if config is not None:
+        report["config"] = dict(config)
+    return report
+
+
+# Fälten som måste stämma för att två körningars tider ska gå att jämföra.
+COMPARABLE_CONFIG_KEYS = ("model", "prompt", "stream")
+
+
+def config_mismatch(current, baseline):
+    """Returnerar en förklaring om körningarna inte mätte samma konfiguration.
+
+    None betyder "bevisligen samma". En saknad `config` räknas som mismatch,
+    inte som match: resultatfiler skrivna innan provenance fanns kan mycket väl
+    ha använt en annan systemprompt, och `baseline.json` gjorde det.
+    """
+    current_config = current.get("config")
+    baseline_config = baseline.get("config")
+    if current_config is None or baseline_config is None:
+        which = "körningen" if current_config is None else "jämförelsekörningen"
+        return f"{which} saknar config, inspelad innan provenance fanns"
+    differences = [
+        f"{key}: {baseline_config.get(key)!r} → {current_config.get(key)!r}"
+        for key in COMPARABLE_CONFIG_KEYS
+        if current_config.get(key) != baseline_config.get(key)
+    ]
+    return ", ".join(differences) if differences else None
 
 
 def paired_ratios(runs_a, runs_b):
@@ -181,9 +215,23 @@ def _delta(current_value, baseline_value):
 
 def render_markdown(current, baseline=None):
     baseline_fixtures = (baseline or {}).get("fixtures", {})
+    mismatch = config_mismatch(current, baseline) if baseline else None
+    if mismatch:
+        # Δ-kolumnen jämför tider som byggts av olika komponenter (t.ex. hela
+        # LLM-svaret mot första meningen, eller två olika systemprompter). Den
+        # ritas inte alls hellre än att den ritas fel.
+        baseline_fixtures = {}
     lines = [
         f"### {current['label']}",
         "",
+    ]
+    if mismatch:
+        lines.append(
+            f"> Δ utelämnad: körningarna mätte olika konfiguration ({mismatch}). "
+            f"WER-jämförelsen nedan gäller fortfarande — den har ingen tidskomponent."
+        )
+        lines.append("")
+    lines += [
         "| Fixtur | STT | LLM | TTS #1 | Till första ljud | Δ | WER |",
         "| :--- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
@@ -204,7 +252,7 @@ def render_markdown(current, baseline=None):
         )
 
     overall = current["median_time_to_first_audio_ms"]
-    baseline_overall = (baseline or {}).get("median_time_to_first_audio_ms")
+    baseline_overall = None if mismatch else (baseline or {}).get("median_time_to_first_audio_ms")
     lines.append("")
     lines.append(
         f"**Median till första ljud: {overall:.0f} ms** {_delta(overall, baseline_overall)}"

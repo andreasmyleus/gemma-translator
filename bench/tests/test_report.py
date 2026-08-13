@@ -14,7 +14,14 @@
 
 import unittest
 
-from bench.report import build_report, gate, median, summarize
+from bench.report import (
+    build_report,
+    config_mismatch,
+    gate,
+    median,
+    render_markdown,
+    summarize,
+)
 from bench.runner import RunResult
 
 
@@ -185,6 +192,40 @@ class TestGate(unittest.TestCase):
         passed, messages = gate(self._report(0.90), legacy)
         self.assertTrue(passed)
         self.assertTrue(any("corpus_wer" in message for message in messages))
+
+
+class TestProvenance(unittest.TestCase):
+    """Utan provenance går två resultatfiler inte att skilja åt i konfiguration
+    — `baseline.json` och `final.json` mättes med olika systemprompt och såg
+    ändå identiska ut."""
+
+    def _report(self, label, config=None):
+        return build_report(label, {"sv-short": summarize([make_result()], "x")}, config)
+
+    def test_config_is_recorded_when_given(self):
+        report = self._report("final", {"model": "gemma4-e2b", "prompt": "plain", "stream": True})
+        self.assertEqual(report["config"]["prompt"], "plain")
+
+    def test_matching_configs_allow_a_delta(self):
+        config = {"model": "m", "prompt": "plain", "stream": False}
+        self.assertIsNone(config_mismatch(self._report("b", config), self._report("a", config)))
+
+    def test_differing_stream_flag_is_reported(self):
+        current = self._report("b", {"model": "m", "prompt": "plain", "stream": True})
+        baseline = self._report("a", {"model": "m", "prompt": "plain", "stream": False})
+        self.assertIn("stream", config_mismatch(current, baseline))
+
+    def test_missing_config_counts_as_mismatch(self):
+        current = self._report("b", {"model": "m", "prompt": "plain", "stream": False})
+        self.assertIn("saknar config", config_mismatch(current, self._report("a")))
+
+    def test_delta_column_is_dropped_when_the_runs_differ(self):
+        current = self._report("b", {"model": "m", "prompt": "plain", "stream": True})
+        baseline = self._report("a", {"model": "m", "prompt": "json", "stream": False})
+        rendered = render_markdown(current, baseline)
+        self.assertIn("Δ utelämnad", rendered)
+        # Ingen procentsiffra i tabellen: Δ byggs av olika komponenter.
+        self.assertNotIn("%", rendered)
 
 
 if __name__ == "__main__":

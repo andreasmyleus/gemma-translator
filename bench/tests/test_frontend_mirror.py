@@ -16,10 +16,12 @@ import unittest
 
 from bench.frontend_mirror import (
     build_llm_payload,
+    first_sentence_end,
+    looks_like_json_envelope,
     parse_translation,
     split_text_into_speech_chunks,
     system_prompt,
-    system_prompt_plain,
+    system_prompt_json,
 )
 
 
@@ -54,30 +56,93 @@ class TestSplitTextIntoSpeechChunks(unittest.TestCase):
 
 
 class TestSystemPrompt(unittest.TestCase):
+    """`system_prompt` är bench:s default och MÅSTE vara produktens prompt.
+
+    Var den något annat mätte varje enarmskörning — och varje arm A — en
+    prompt appen inte skickar. Det är inte en detalj: promptlängden avgör om
+    en fixtur hamnar på fel sida kontextklippan vid ~725 tecken.
+    """
+
     def test_uses_first_word_of_language_names(self):
         prompt = system_prompt("Swedish (Source)", "English (Translation)")
         self.assertIn("from Swedish into English", prompt)
         self.assertNotIn("(Source)", prompt)
 
-    def test_demands_bare_json_object(self):
+    def test_default_prompt_is_the_plain_one_the_product_sends(self):
         prompt = system_prompt("Swedish", "English")
-        self.assertIn('"translation"', prompt)
-
-
-class TestSystemPromptPlain(unittest.TestCase):
-    def test_uses_first_word_of_language_names(self):
-        prompt = system_prompt_plain("Swedish (Source)", "English (Translation)")
-        self.assertIn("from Swedish into English", prompt)
-        self.assertNotIn("(Source)", prompt)
-
-    def test_asks_for_bare_translation_without_json(self):
-        prompt = system_prompt_plain("Swedish", "English")
         self.assertNotIn("JSON", prompt)
-        self.assertNotIn("translation\":", prompt)
+        self.assertNotIn('translation":', prompt)
 
     def test_stays_short(self):
         # Prompten prefillas vid varje anrop; håll den kort.
-        self.assertLess(len(system_prompt_plain("Swedish", "English")), 200)
+        self.assertLess(len(system_prompt("Swedish", "English")), 200)
+
+
+class TestSystemPromptJson(unittest.TestCase):
+    def test_uses_first_word_of_language_names(self):
+        prompt = system_prompt_json("Swedish (Source)", "English (Translation)")
+        self.assertIn("from Swedish into English", prompt)
+        self.assertNotIn("(Source)", prompt)
+
+    def test_demands_bare_json_object(self):
+        self.assertIn('"translation"', system_prompt_json("Swedish", "English"))
+
+
+class TestFirstSentenceEnd(unittest.TestCase):
+    """Speglar TranslatorApp.speakCompleteSentences.
+
+    Regressionen som fanns: bench använde `endswith`, som bara avfyrar när ett
+    delta *slutar* på skiljetecken. Produkten använder `lastIndexOf` och
+    avfyrar på första delta som *innehåller* ett. På den riktiga
+    sv-multi-översättningen gav det 165 mot 52 tecken, alltså
+    first_sentence == hela svaret, alltså "strömning är värdelös".
+    """
+
+    SV_MULTI = (
+        "I would need to book a room for two nights. Could you also tell me if "
+        "breakfast is included in the price? I also wonder where the nearest ATM is."
+    )
+
+    def test_fires_on_a_delta_that_only_contains_punctuation(self):
+        # Delta slutar mitt i nästa mening — endswith hade missat den här.
+        self.assertEqual(first_sentence_end("Hej där. Sedan"), 8)
+
+    def test_matches_the_products_position_on_the_real_sv_multi_output(self):
+        upto = first_sentence_end(self.SV_MULTI[:60])
+        self.assertEqual(upto, 43)
+        self.assertEqual(
+            self.SV_MULTI[:upto], "I would need to book a room for two nights."
+        )
+
+    def test_no_punctuation_yields_none(self):
+        self.assertIsNone(first_sentence_end("Ingen mening än"))
+
+    def test_takes_the_last_complete_sentence_in_the_delta(self):
+        # lastIndexOf, inte indexOf: allt färdigt talas i ett svep.
+        self.assertEqual(first_sentence_end("Ett. Två! Tre"), 9)
+
+    def test_already_spoken_prefix_is_not_repeated(self):
+        self.assertIsNone(first_sentence_end("Ett. Två", spoken_chars=4))
+        self.assertEqual(first_sentence_end("Ett. Två.", spoken_chars=4), 9)
+
+    def test_whitespace_only_remainder_is_not_spoken(self):
+        # Appens `if (!ready) return`.
+        self.assertIsNone(first_sentence_end("Ett.   ", spoken_chars=4))
+
+    def test_json_envelope_is_never_spoken_partially(self):
+        # Appen skickar inga partiella deltan alls för ett wrapper-svar, så
+        # bench får inte påstå att en mening kunde talas då.
+        self.assertIsNone(first_sentence_end('{"translation": "Hej.'))
+        self.assertIsNone(first_sentence_end('```json\n{"translation": "Hej.'))
+
+
+class TestLooksLikeJsonEnvelope(unittest.TestCase):
+    def test_detects_object_and_fence_starts(self):
+        self.assertTrue(looks_like_json_envelope('  {"translation"'))
+        self.assertTrue(looks_like_json_envelope("```json"))
+
+    def test_plain_text_is_not_an_envelope(self):
+        self.assertFalse(looks_like_json_envelope("Where is the station?"))
 
 
 class TestBuildLlmPayload(unittest.TestCase):

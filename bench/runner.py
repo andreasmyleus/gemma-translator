@@ -24,13 +24,14 @@ import base64
 import json
 import time
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import requests
 
 from bench.fixtures import check_duration, ensure_wav, load_pcm_16k
 from bench.frontend_mirror import (
     build_llm_payload,
+    first_sentence_end,
     parse_translation,
     split_text_into_speech_chunks,
     system_prompt,
@@ -94,11 +95,13 @@ def _post_llm(api_base, llm_url, model, text, src_lang, dst_lang, prompt_fn=syst
     return parse_translation(raw), elapsed_ms
 
 
-_SENTENCE_END = (".", "!", "?", "…")
-
-
 def _post_llm_streaming(api_base, llm_url, model, text, src_lang, dst_lang, prompt_fn=system_prompt):
-    """Som _post_llm men mäter också när första hela meningen är klar."""
+    """Som _post_llm men mäter också när första hela meningen är klar.
+
+    Meningsdetektionen ligger i `frontend_mirror.first_sentence_end` för att
+    vara samma logik som appens `speakCompleteSentences` — det är den
+    tidpunkten produkten faktiskt börjar syntetisera på.
+    """
     prompt = prompt_fn(LANGUAGE_NAMES[src_lang], LANGUAGE_NAMES[dst_lang])
     payload = build_llm_payload(text, model, prompt)
     payload["stream"] = True
@@ -117,22 +120,38 @@ def _post_llm_streaming(api_base, llm_url, model, text, src_lang, dst_lang, prom
         # Frontends TextDecoder defaultar till UTF-8 och har aldrig haft
         # problemet, så det här är bench-specifikt.
         response.encoding = "utf-8"
+        completed = False
         for line in response.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data:"):
                 continue
             data = line[5:].strip()
-            if not data or data == "[DONE]":
+            if not data:
+                continue
+            if data == "[DONE]":
+                completed = True
                 continue
             try:
-                delta = json.loads(data)["choices"][0].get("delta", {}).get("content")
+                choice = json.loads(data)["choices"][0]
             except (ValueError, KeyError, IndexError):
                 continue
+            if choice.get("finish_reason"):
+                completed = True
+            delta = choice.get("delta", {}).get("content")
             if not delta:
                 continue
             accumulated += delta
-            if not first_sentence_ms and accumulated.rstrip().endswith(_SENTENCE_END):
+            if not first_sentence_ms and first_sentence_end(accumulated) is not None:
                 first_sentence_ms = (time.perf_counter() - started) * 1000
     total_ms = (time.perf_counter() - started) * 1000
+    if not completed:
+        # En avbruten ström ger en halv översättning MEN korta tider — alltså
+        # en falsk vinst som ser ut som en lyckad körning. litert-lm avslutar
+        # med både `finish_reason` och `data: [DONE]`; saknas båda är svaret
+        # trunkerat och körningen får inte räknas.
+        raise ValueError(
+            f"Strömmen avslutades utan finish_reason/[DONE] efter "
+            f"{len(accumulated)} tecken — trunkerat svar"
+        )
     if not first_sentence_ms:
         # Svar utan skiljetecken: hela svaret är "första meningen".
         first_sentence_ms = total_ms

@@ -19,10 +19,12 @@ något annat än produkten. Allt som dupliceras ligger därför här, i en enda
 fil, så att det finns precis ett ställe att synka när frontend ändras.
 
 Speglar:
-  frontend/src/utils/api.js:154-168  splitTextIntoSpeechChunks
-  frontend/src/utils/api.js:72-83    generatePayloadJSON
-  frontend/src/utils/api.js:126-144  JSON-uttolkningen i translateText
-  frontend/src/TranslatorApp.jsx:253 systemprompten i processTranslation
+  frontend/src/utils/api.js       splitTextIntoSpeechChunks
+  frontend/src/utils/api.js       generatePayloadJSON
+  frontend/src/utils/api.js       parseTranslation
+  frontend/src/utils/api.js       envelope-vakten i translateTextStreaming
+  frontend/src/TranslatorApp.jsx  systemprompten i processTranslation
+  frontend/src/TranslatorApp.jsx  speakCompleteSentences
 
 Ändras någon av dem måste den här filen ändras i samma commit.
 """
@@ -56,9 +58,30 @@ def split_text_into_speech_chunks(text, limit=SPEECH_CHUNK_LIMIT):
 
 
 def system_prompt(src_name, dst_name):
-    """Speglar prompten som byggs i TranslatorApp.jsx:253 (processTranslation).
+    """Speglar prompten produkten faktiskt skickar (processTranslation).
 
-    JSON-wrapper-varianten. Detta är standardprompten (arm A i --ab-prompt).
+    Detta är standardprompten i bench, precis som i appen. Byts prompten i
+    TranslatorApp.jsx måste den bytas här i samma commit — annars mäter bench
+    en prompt som inte finns, och promptlängd är enligt kampanjens egen
+    mätning en av de största latensfaktorerna på den här modellen (README,
+    "kontextklippan" vid ~725 tecken total kontext).
+    """
+    src = src_name.split(" ")[0]
+    dst = dst_name.split(" ")[0]
+    return (
+        f"Translate the user's text from {src} into {dst}. "
+        f"Reply with the translation only — no explanations, no alternatives, "
+        f"no quotes, no preamble."
+    )
+
+
+def system_prompt_json(src_name, dst_name):
+    """Den gamla JSON-wrapper-prompten. Produkten skickar den INTE längre.
+
+    Kvar enbart som mätvariant (`--prompt json` / `--ab-prompt json`), så att
+    Task 12:s mätning går att reproducera och så att kontextklippan går att
+    demonstrera igen. `parse_translation` tolererar fortfarande svaret, så en
+    körning med den här varianten mäter samma kedja.
     """
     src = src_name.split(" ")[0]
     dst = dst_name.split(" ")[0]
@@ -76,21 +99,51 @@ def system_prompt(src_name, dst_name):
     )
 
 
-def system_prompt_plain(src_name, dst_name):
-    """Kort systemprompt utan JSON-wrapper — kandidat för `--ab-prompt plain`.
+# Namngivna promptvarianter. "plain" är produktens prompt och bench:s default.
+PROMPT_VARIANTS = {"plain": system_prompt, "json": system_prompt_json}
+DEFAULT_PROMPT = "plain"
 
-    Ingen ändring behövs i `parse_translation`: den faller redan tillbaka på
-    rå text när svaret inte är JSON, så ett vanligt textsvar tolkas rätt utan
-    vidare. Om den här varianten mäts snabbare och håller översättnings-
-    kvaliteten ska frontend/src/TranslatorApp.jsx bytas i samma commit.
+
+SENTENCE_ENDS = (".", "!", "?", "…")
+
+
+def looks_like_json_envelope(text):
+    """Speglar envelope-vakten i translateTextStreaming (api.js).
+
+    En delvis mottagen `{"translation": "Hej` går inte att tolka, så appen
+    skickar inte partiella deltan vidare alls när svaret ser ut att börja på
+    den gamla JSON-wrappern — den väntar tills hela svaret är parsat. Bench
+    måste göra samma bedömning, annars påstår mätningen att en mening kunde
+    talas vid ett tillfälle då produkten hade varit tyst.
     """
-    src = src_name.split(" ")[0]
-    dst = dst_name.split(" ")[0]
-    return (
-        f"Translate the user's text from {src} into {dst}. "
-        f"Reply with the translation only — no explanations, no alternatives, "
-        f"no quotes, no preamble."
-    )
+    stripped = text.lstrip()
+    return stripped.startswith("{") or stripped.startswith("```")
+
+
+def first_sentence_end(text, spoken_chars=0):
+    """Slutindex (exklusivt) för den sist färdiga meningen, annars None.
+
+    Speglar `speakCompleteSentences` i TranslatorApp.jsx: appen använder
+    `lastIndexOf` per skiljetecken och talar allt fram till och med det sista
+    av dem. Den avfyrar alltså på det första delta som *innehåller* ett
+    skiljetecken, inte bara på ett delta som *slutar* på ett. Bench använde
+    tidigare `endswith`, vilket bara råkar avfyra när litert-lm skickar
+    skiljetecknet som ett eget event — på sv-multi (första meningen slutar vid
+    tecken 43 av 165) hamnade den mätta meningsgränsen på 4726 ms av ett
+    6016 ms långt svar i stället för strax efter första meningen.
+
+    Returnerar None när ingen ny färdig mening finns, eller när det som skulle
+    talas bara är blanktecken (appens `if (!ready) return`).
+    """
+    if looks_like_json_envelope(text):
+        return None
+    last_end = max(text.rfind(mark) for mark in SENTENCE_ENDS)
+    if last_end < spoken_chars:
+        return None
+    upto = last_end + 1
+    if not text[spoken_chars:upto].strip():
+        return None
+    return upto
 
 
 def build_llm_payload(text, model, system_prompt_text):
