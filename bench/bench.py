@@ -104,13 +104,19 @@ def load_result(label):
         return json.load(handle)
 
 
-def run_ab(args, fixtures, ab_env):
+def run_ab(args, fixtures, ab_env, model_b):
     """Kör arm A (oförändrad miljö) och arm B (`ab_env` ovanpå) varvat, ABBA.
 
     Varvningen är poängen: ett par mätt inom sekunder av varandra delar
     belastningstillstånd på den här maskinen, så kvoten mellan dem är
     jämförbar på ett sätt två körningar tagna minuter isär inte är. Se
     `bench/report.paired_ratios` och docstringen på `--ab` ovan.
+
+    `model_b` är modell-id:t arm B anropar litert-lm med (`--ab-model`,
+    default samma som arm A). Det är skilt från `ab_env` eftersom modellen
+    väljs per anrop via `--model`-argumentet till `run_fixture`, inte av
+    backend-processens miljö — `--ab`s KEY=VAL-mekanism kan inte uttrycka
+    det.
     """
     api_base_a = f"http://localhost:{args.api_port}"
     api_base_b = f"http://localhost:{args.api_port + 1}"
@@ -120,7 +126,10 @@ def run_ab(args, fixtures, ab_env):
     backend_b = start_backend(args.api_port + 1, extra_env=ab_env)
     try:
         warmup(api_base_a, llm_url, args.model, fixtures)
-        warmup(api_base_b, llm_url, args.model, fixtures)
+        # Arm B värms med model_b, inte args.model — annars laddar litert-lm
+        # fortfarande CPU-modellen i uppvärmningen och arm B:s första mätta
+        # repetition bär GPU-buildens ~7 s vikt-laddningskostnad i stället.
+        warmup(api_base_b, llm_url, model_b, fixtures)
 
         per_fixture_a, per_fixture_b, paired = {}, {}, {}
         for fixture_id, spec in fixtures.items():
@@ -131,7 +140,8 @@ def run_ab(args, fixtures, ab_env):
                 order = ["a", "b"] if attempt % 2 == 0 else ["b", "a"]
                 for arm in order:
                     base = api_base_a if arm == "a" else api_base_b
-                    result = run_fixture(base, llm_url, args.model, fixture_id, spec)
+                    model = args.model if arm == "a" else model_b
+                    result = run_fixture(base, llm_url, model, fixture_id, spec)
                     (runs_a if arm == "a" else runs_b).append(result)
                     print(
                         f"[bench] {fixture_id} {attempt + 1}/{args.repeats} arm {arm.upper()}: "
@@ -160,6 +170,8 @@ def run_ab(args, fixtures, ab_env):
         "label": args.label,
         "mode": "ab",
         "ab_env": ab_env,
+        "model_a": args.model,
+        "model_b": model_b,
         "arm_a": report_a,
         "arm_b": report_b,
         "paired": paired,
@@ -172,7 +184,10 @@ def run_ab(args, fixtures, ab_env):
         json.dump(report, handle, indent=2, ensure_ascii=False)
 
     print()
-    print(render_markdown_ab(args.label, paired, drift, ab_env))
+    ab_note = dict(ab_env or {})
+    if model_b != args.model:
+        ab_note["model"] = f"{args.model} -> {model_b}"
+    print(render_markdown_ab(args.label, paired, drift, ab_note))
     print()
 
     # Arm A är facit i grinden: en optimering som knäcker WER mot sitt eget
@@ -198,6 +213,20 @@ def main():
             "det --ab finns för att kringgå."
         ),
     )
+    parser.add_argument(
+        "--ab-model",
+        help=(
+            "Kör en parvis A/B-mätning där arm B anropar litert-lm med ett "
+            "annat modell-id än arm A, t.ex. \"gemma4-e2b,gpu\". Skild från "
+            "--ab: modellen väljs per anrop via --model, inte av backend-"
+            "processens miljö, så --ab kan inte uttrycka den här ändringen. "
+            "Måste vara ett eget flagg snarare än gå via --ab också av en "
+            "annan anledning — \"gemma4-e2b,gpu\" innehåller ett kommatecken, "
+            "som är --ab:s egen separator mellan KEY=VAL-par, så det skulle "
+            "delas upp fel. Kan kombineras med --ab (byt miljövariabel och "
+            "modell samtidigt) men inte med --compare, av samma skäl som --ab."
+        ),
+    )
     parser.add_argument("--api-port", type=int, default=3100)
     parser.add_argument("--llm-port", type=int, default=9379)
     parser.add_argument("--model", default="gemma4-e2b")
@@ -213,6 +242,10 @@ def main():
             "--ab och --compare kan inte kombineras: --ab jämför inom samma körning "
             "för att kringgå precis den drift --compare inte skyddar mot."
         )
+    if args.ab_model and args.compare:
+        raise SystemExit(
+            "--ab-model och --compare kan inte kombineras, av samma skäl som --ab."
+        )
 
     fixtures = load_fixtures()
     if args.fixtures:
@@ -221,8 +254,8 @@ def main():
         if not fixtures:
             raise SystemExit(f"Inga fixturer matchade {args.fixtures!r}")
 
-    if args.ab:
-        return run_ab(args, fixtures, parse_env_overrides(args.ab))
+    if args.ab or args.ab_model:
+        return run_ab(args, fixtures, parse_env_overrides(args.ab), args.ab_model or args.model)
 
     api_base = f"http://localhost:{args.api_port}"
     llm_url = f"http://localhost:{args.llm_port}/v1/chat/completions"
