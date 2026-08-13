@@ -99,7 +99,9 @@ function parseTranslation(modelResponse) {
 // Chat-completions request. The system prompt asks for a bare translation
 // (no JSON wrapper) to keep prefill and output short, but we still tolerate
 // a legacy {"translation": ...} reply (``` fences included) and fall back to
-// the raw reply text if parsing fails.
+// the raw reply text if parsing fails. The prompt is user-editable in
+// Settings, so that tolerance is reachable without a code change — see
+// translateTextStreaming for how the streaming path honours it.
 export async function translateText(transcribedText, config) {
   const { endpointUrl, useProxy, apiKey, modelName, systemPrompt } = config
   const baseUrl = getNormalizedBaseUrl(endpointUrl)
@@ -149,7 +151,23 @@ export async function translateText(transcribedText, config) {
 
 // Streaming chat-completions. Calls `onText(fullTextSoFar)` after every delta
 // so the caller can start speaking sentence one while the rest generates.
-export async function translateTextStreaming(transcribedText, config, onText) {
+//
+// `onText` receives text that is safe to show and speak. A half-received
+// legacy envelope (`{"translation": "Hej.`) is neither: it cannot be parsed
+// yet, and speaking it verbatim is exactly what the tolerance in
+// `parseTranslation` exists to avoid. So when the reply opens like an
+// envelope, partials are suppressed entirely and the caller gets the parsed
+// text once, in the return value. `raw` is the unparsed accumulated text —
+// the caller can compare it with `translation` to tell whether the offsets it
+// accumulated while streaming still address the same string.
+//
+// Pass `signal` (an AbortSignal) to stop a superseded translation.
+export async function translateTextStreaming(
+  transcribedText,
+  config,
+  onText,
+  signal,
+) {
   const { endpointUrl, useProxy, apiKey, modelName, systemPrompt } = config
   const targetUrl = `${getNormalizedBaseUrl(endpointUrl)}/chat/completions`
   const payload = JSON.parse(
@@ -170,6 +188,7 @@ export async function translateTextStreaming(transcribedText, config, onText) {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
+    signal,
   })
   if (!response.ok) {
     const errorText = await response.text()
@@ -180,6 +199,8 @@ export async function translateTextStreaming(transcribedText, config, onText) {
   const decoder = new TextDecoder()
   let buffer = ""
   let text = ""
+  // null until the first non-blank character decides it.
+  let isEnvelope = null
 
   for (;;) {
     const { done, value } = await reader.read()
@@ -196,7 +217,11 @@ export async function translateTextStreaming(transcribedText, config, onText) {
         const delta = JSON.parse(data).choices?.[0]?.delta?.content
         if (delta) {
           text += delta
-          onText(text)
+          const head = text.trimStart()
+          if (isEnvelope === null && head.length > 0) {
+            isEnvelope = head.startsWith("{") || head.startsWith("```")
+          }
+          if (isEnvelope === false && onText) onText(text)
         }
       } catch (e) {
         // A malformed line is not worth aborting the stream over.
@@ -206,6 +231,7 @@ export async function translateTextStreaming(transcribedText, config, onText) {
 
   return {
     translation: parseTranslation(text),
+    raw: text,
     duration: ((Date.now() - startRequestTime) / 1000).toFixed(2),
   }
 }

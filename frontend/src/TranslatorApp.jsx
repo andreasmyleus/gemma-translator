@@ -83,23 +83,37 @@ function TranslatorApp({ config }) {
     }
   }, [micError])
 
-  // Sentences waiting to be spoken. Each entry is an already-constructed Audio
-  // element: creating it starts the fetch, so queued chunks download while the
-  // current one plays.
+  // Sentences waiting to be spoken. Each entry is { player, marks }: the Audio
+  // element is already constructed (creating it starts the fetch, so queued
+  // chunks download while the current one plays), and `marks` is the timing
+  // object that was current when the chunk was queued.
   const ttsQueueRef = useRef({ pending: [], playing: false })
 
-  const markFirstAudio = useCallback(() => {
-    const marks = timingRef.current
+  // Bumped whenever a new recording starts. Everything a translation does
+  // afterwards — speaking, writing the panels — is guarded on still owning the
+  // current value, so an interrupted translation cannot talk over the next one.
+  const generationRef = useRef(0)
+  // The in-flight streamed translation, so it can be aborted when superseded.
+  const inflightRef = useRef(null)
+
+  // Report one utterance's latency. `marks` is passed in rather than read from
+  // timingRef: re-reading the ref here would let a late-firing chunk from a
+  // previous utterance stamp `logged` on the *next* utterance's marks, silently
+  // suppressing its measurement (see commit 08c6df0).
+  const reportLatency = useCallback((marks, audioStarted) => {
     if (!marks || marks.logged) return
     marks.logged = true
-    const since = (mark) => `${(mark - marks.keyup) | 0}ms`
+    // An unset mark prints as "—", never as a fabricated 0ms: `llm` is stamped
+    // at the first token, so it is set well before audio starts, but a failed
+    // or skipped stage must not read as instantaneous.
+    const since = (mark) =>
+      typeof mark === "number" ? `${(mark - marks.keyup) | 0}ms` : "—"
+    const audio = audioStarted ? since(performance.now()) : "—"
     console.log(
-      `[latency] keyup→stt ${since(marks.stt)} | →llm ${since(marks.llm)} ` +
-        `| →first audio ${since(performance.now())}`,
+      `[latency] keyup→stt ${since(marks.stt)} | →llm first token ${since(marks.llm)} ` +
+        `| →first audio ${audio}`,
     )
-    setMetaText(
-      `STT ${since(marks.stt)} · LLM ${since(marks.llm)} · ljud ${since(performance.now())}`,
-    )
+    setMetaText(`STT ${since(marks.stt)} · LLM ${since(marks.llm)} · ljud ${audio}`)
   }, [])
 
   const stopSpeaking = useCallback(() => {
@@ -114,11 +128,12 @@ function TranslatorApp({ config }) {
   const pumpTTSQueue = useCallback(() => {
     const queue = ttsQueueRef.current
     if (queue.playing) return
-    const player = queue.pending.shift()
-    if (!player) return
+    const entry = queue.pending.shift()
+    if (!entry) return
+    const { player, marks } = entry
     queue.playing = true
     onlineAudioPlayerRef.current = player
-    player.onplaying = markFirstAudio
+    player.onplaying = () => reportLatency(marks, true)
     player.onended = () => {
       queue.playing = false
       pumpTTSQueue()
@@ -133,18 +148,18 @@ function TranslatorApp({ config }) {
       queue.playing = false
       stopSpeaking()
     })
-  }, [markFirstAudio, stopSpeaking])
+  }, [reportLatency, stopSpeaking])
 
   // Queue text for playback. Safe to call repeatedly as sentences arrive.
   const enqueueTTS = useCallback(
-    (text, targetLang) => {
+    (text, targetLang, marks) => {
       if (!text) return
       for (const chunk of splitTextIntoSpeechChunks(text)) {
         const url = `/api/tts?text=${encodeURIComponent(chunk)}&lang=${encodeURIComponent(targetLang)}`
         const player = new Audio(url)
         player.preload = "auto"
         player.volume = 1.0
-        ttsQueueRef.current.pending.push(player)
+        ttsQueueRef.current.pending.push({ player, marks })
       }
       pumpTTSQueue()
     },
@@ -177,6 +192,11 @@ function TranslatorApp({ config }) {
   const handleRecordStart = useCallback(
     async (lane) => {
       if (isRecording) return
+      // Supersede whatever the previous utterance is still doing. stopSpeaking
+      // alone is not enough: its stream keeps arriving, and every new sentence
+      // would find an empty queue and start playing over the new recording.
+      generationRef.current += 1
+      if (inflightRef.current) inflightRef.current.abort()
       stopSpeaking()
 
       setActivePerson((prev) => {
@@ -211,6 +231,15 @@ function TranslatorApp({ config }) {
 
   // Translation Pipeline
   const processTranslation = async (lane, base64Data) => {
+    // This utterance owns the generation handleRecordStart bumped for it, and
+    // its own marks object. Both are captured once: everything below asks
+    // "am I still the current utterance?" rather than reading live state.
+    const generation = generationRef.current
+    const marks = timingRef.current
+    const isCurrent = () => generationRef.current === generation
+    const controller = new AbortController()
+    inflightRef.current = controller
+
     setIsDrawerOpen(true)
 
     const src =
@@ -236,7 +265,8 @@ function TranslatorApp({ config }) {
       // 1. Transcription
       setTranscriptionData((prev) => ({ ...prev, text: "Listening..." }))
       const transcribedText = await transcribeAudio(base64Data, src.code)
-      if (timingRef.current) timingRef.current.stt = performance.now()
+      if (!isCurrent()) return
+      if (marks) marks.stt = performance.now()
       setTranscriptionData((prev) => ({ ...prev, text: transcribedText }))
 
       if (!transcribedText.trim()) {
@@ -248,8 +278,11 @@ function TranslatorApp({ config }) {
       }
 
       // 2. Translation, streamed — speak each sentence as soon as it lands.
+      // `spokenChars` indexes into whatever string was last passed here, so
+      // every call must be given the same string; see the reset below.
       let spokenChars = 0
       const speakCompleteSentences = (full, isFinal) => {
+        if (!isCurrent()) return
         let upto = full.length
         if (!isFinal) {
           const lastEnd = Math.max(
@@ -264,7 +297,7 @@ function TranslatorApp({ config }) {
         const ready = full.slice(spokenChars, upto).trim()
         if (!ready) return
         spokenChars = upto
-        if (config.enableTts) enqueueTTS(ready, dst.ttsLang)
+        if (config.enableTts) enqueueTTS(ready, dst.ttsLang, marks)
       }
 
       const result = await translateTextStreaming(
@@ -275,24 +308,41 @@ function TranslatorApp({ config }) {
           systemPrompt: `Translate the user's text from ${src.name.split(" ")[0]} into ${dst.name.split(" ")[0]}. Reply with the translation only — no explanations, no alternatives, no quotes, no preamble.`,
         },
         (partial) => {
+          if (!isCurrent()) return
+          // First token, not "response complete": this is what the drawer's
+          // LLM figure means, and it is the only LLM mark that exists before
+          // sentence one starts playing.
+          if (marks && !marks.llm) marks.llm = performance.now()
           setTranslationData((prev) => ({ ...prev, text: partial }))
           speakCompleteSentences(partial, false)
         },
+        controller.signal,
       )
 
-      if (timingRef.current) timingRef.current.llm = performance.now()
+      if (!isCurrent()) return
+      if (marks && !marks.llm) marks.llm = performance.now()
+      // The streamed text and the parsed translation are only the same string
+      // when the model answered in plain text. If they differ — a legacy JSON
+      // envelope, which also means no partials were emitted — `spokenChars`
+      // counts into a string that is not this one, so slicing with it would
+      // cut at unrelated offsets.
+      if (result.translation !== result.raw) spokenChars = 0
       setTranslationData((prev) => ({ ...prev, text: result.translation }))
       speakCompleteSentences(result.translation, true)
-      // Tokens rapporteras inte av litert-lm (usage saknas i svaret), och
-      // latenssiffrorna sätts av markFirstAudio när ljudet faktiskt börjar
-      // spela.
+      // Tokens rapporteras inte av litert-lm (usage saknas i svaret). Med TTS
+      // på sätts latensraden av reportLatency när ljudet börjar spela; utan
+      // TTS spelas inget, så den skrivs här i stället för att aldrig skrivas.
+      if (!config.enableTts) reportLatency(marks, false)
     } catch (err) {
+      if (err.name === "AbortError" || !isCurrent()) return
       console.error(err)
       setTranscriptionData((prev) => ({
         ...prev,
         text: prev.text === "Listening..." ? "(Transcription failed)" : prev.text,
       }))
       setTranslationData((prev) => ({ ...prev, text: `Error: ${err.message}` }))
+    } finally {
+      if (inflightRef.current === controller) inflightRef.current = null
     }
   }
 
