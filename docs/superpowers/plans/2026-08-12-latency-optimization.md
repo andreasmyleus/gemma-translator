@@ -2998,3 +2998,189 @@ Kampanjen är klar när:
 - `bench/results/` innehåller en fil per steg, alla committade
 - README:s latenstabell är ifylld med riktiga siffror
 - Browser-milstolpen visar `→first audio` mindre än `→llm`, vilket bevisar att strömningen ger effekt i den riktiga appen
+
+---
+
+## Task 18: Parvis A/B-mätning
+
+**Files:**
+- Modify: `backend/server.py` (VAD bakom env-flagga)
+- Modify: `bench/bench.py` (`--ab`, två backends, varvade repetitioner)
+- Modify: `bench/runner.py` (oförändrat gränssnitt, men anropas per arm)
+- Modify: `bench/report.py` (parvis sammanställning)
+- Create: `bench/tests/test_report_ab.py`
+
+### Varför
+
+Mätningen av optimering 1 gav −20 % till första ljud. Kontrollen visade att
+siffran inte gick att tillskriva ändringen: samtliga nio transkriptioner och
+samtliga nio översättningar var bytemässigt identiska mellan baseline och
+`01-vad` — LLM-steget gjorde alltså exakt samma arbete — men dess summerade
+tid föll ändå från 25 996 ms till 21 035 ms. VAD kan inte göra Gemma
+snabbare. Skillnaden var maskinbelastning.
+
+Två körningar tagna vid olika tidpunkter är inte jämförbara på den här
+maskinen. Effekterna vi jagar (enstaka procent till tiotals procent) är
+mindre än driften mellan körningar. Lösningen är att mäta båda
+konfigurationerna i samma körning, varvade, så att drift träffar båda armarna
+lika.
+
+### Designbeslut
+
+**1. Optimeringar env-gatas, med produktens ursprungsbeteende som default.**
+En optimering som är inbakad i koden går inte att A/B-testa utan att bygga om.
+Varje optimering får därför en env-flagga som default är av, alltså
+oförändrat beteende. Defaultarna flippas till på i Task 17, efter att de
+mätts. Det gör också att produkten inte tar in någon ändring innan den är
+bevisad.
+
+VAD flyttas som första exempel: `STT_VAD` (default `0`).
+
+**2. Bänken startar två backends och varvar per repetition.**
+`--ab "KEY=VAL[,KEY2=VAL2]"` startar arm B på `--api-port + 1` med de
+angivna env-variablerna ovanpå arm A:s miljö. Arm A är den oförändrade
+miljön.
+
+**3. Ordningen alterneras (ABBA).** Varvar man alltid A före B lägger sig en
+eventuell systematisk ordningseffekt — cache-uppvärmning, termisk drift —
+konsekvent på den ena armen. Repetition 1 kör A,B; repetition 2 kör B,A; och
+så vidare.
+
+**4. Statistiken är parvis.** Rapportera medianen av *kvoterna per par*
+(`B/A` för varje repetition), inte kvoten mellan medianerna. Ett par mätt
+inom några sekunder av varandra delar belastningstillstånd; att jämföra
+aggregat över hela körningen gör inte det.
+
+**5. Drift redovisas per steg.** Rapporten skriver ut den parvisa kvoten för
+varje steg — `stt_ms`, `llm_ms`, `tts_first_ms`. Den som läser tabellen kan
+då själv se om ett steg som ändringen omöjligt kan påverka ändå rört sig,
+vilket är signalen att mätningen är otillförlitlig. Det var precis den
+kontrollen som avslöjade problemet med optimering 1.
+
+- [ ] **Step 1: Env-gata VAD**
+
+I `backend/server.py`, bredvid `WHISPER_MODEL_SIZE`:
+
+```python
+# Optimeringar hålls bakom flaggor så att bench kan A/B-testa dem i samma
+# körning, och så att produkten behåller sitt ursprungsbeteende tills en
+# ändring är uppmätt. Defaultarna flippas när kampanjen är klar.
+STT_VAD = os.environ.get("STT_VAD", "0") == "1"
+```
+
+och i `transcribe`, ersätt `vad_filter=True` med `vad_filter=STT_VAD`.
+
+- [ ] **Step 2: Verifiera att båda lägena fungerar**
+
+Run:
+```bash
+lsof -ti:3100,3101 | xargs kill 2>/dev/null
+for v in 0 1; do
+  STT_VAD=$v PORT=3100 venv/bin/python3 backend/server.py > /tmp/vad-$v.log 2>&1 &
+  sleep 25
+  venv/bin/python3 -c "
+import numpy as np, requests, base64
+from bench.fixtures import ensure_wav, load_pcm_16k, load_fixtures
+s = load_pcm_16k(ensure_wav('sv-medium', load_fixtures()['sv-medium']))
+r = requests.post('http://localhost:3100/api/stt',
+                  json={'audio_base64': base64.b64encode(s.astype('<f4').tobytes()).decode(), 'language':'sv'},
+                  timeout=120)
+print('STT_VAD=$v ->', repr(r.json()['text']))
+"
+  lsof -ti:3100 | xargs kill 2>/dev/null; sleep 1
+done
+```
+Expected: båda ger en rimlig svensk transkription. De behöver inte vara
+identiska — VAD ändrar vad modellen ser.
+
+- [ ] **Step 3: Lägg till `--ab` i bench**
+
+`start_backend(port, extra_env=None)` tar nu extra miljövariabler. `main`
+parsar `--ab` till en dict, startar arm B på `args.api_port + 1` när flaggan
+är satt, och kör mätslingan så här:
+
+```python
+        for fixture_id, spec in fixtures.items():
+            runs_a, runs_b = [], []
+            for attempt in range(args.repeats):
+                # ABBA: varannan repetition kör B först, så att en systematisk
+                # ordningseffekt inte lägger sig på samma arm varje gång.
+                order = ["a", "b"] if attempt % 2 == 0 else ["b", "a"]
+                for arm in order:
+                    base = api_base_a if arm == "a" else api_base_b
+                    result = run_fixture(base, llm_url, args.model, fixture_id, spec)
+                    (runs_a if arm == "a" else runs_b).append(result)
+                    print(
+                        f"[bench] {fixture_id} {attempt + 1}/{args.repeats} arm {arm.upper()}: "
+                        f"{result.time_to_first_audio_ms:.0f} ms, "
+                        f"{'ok' if result.ok else 'FEL ' + result.error}",
+                        flush=True,
+                    )
+            per_fixture_a[fixture_id] = summarize(runs_a[1:] or runs_a, spec["text"])
+            per_fixture_b[fixture_id] = summarize(runs_b[1:] or runs_b, spec["text"])
+            paired[fixture_id] = paired_ratios(runs_a[1:] or runs_a, runs_b[1:] or runs_b)
+```
+
+Båda armarna värms upp innan mätningen börjar. Resultatfilen får både armarnas
+fulla rapporter och den parvisa sammanställningen.
+
+- [ ] **Step 4: Parvis statistik i `bench/report.py`**
+
+```python
+def paired_ratios(runs_a, runs_b):
+    """Median av kvoten B/A per repetitionspar, per mätpunkt.
+
+    Paren mäts inom sekunder från varandra och delar därför
+    belastningstillstånd. Att i stället dela medianerna mot varandra jämför
+    aggregat som kan ha tagits under helt olika förhållanden — vilket är
+    exakt det felet den här funktionen finns för att undvika.
+    """
+    ratios = {}
+    for metric in METRICS:
+        values = []
+        for run_a, run_b in zip(runs_a, runs_b):
+            if not (run_a.ok and run_b.ok):
+                continue
+            a = getattr(run_a, metric)
+            if a > 0:
+                values.append(getattr(run_b, metric) / a)
+        ratios[metric] = median(values) if values else None
+    return ratios
+```
+
+Och en renderare som skriver en rad per fixtur med den parvisa kvoten för
+`time_to_first_audio_ms`, plus en driftrad per steg över alla fixturer.
+
+- [ ] **Step 5: Tester**
+
+Skapa `bench/tests/test_report_ab.py` med minst:
+- att `paired_ratios` parar ihop repetitionerna i ordning, inte aggregat
+- att ett par där någon arm misslyckades hoppas över utan att skeva resten
+- att en konstruerad 20-procentig förbättring i arm B ger kvot 0,8, även när
+  de absoluta talen driver kraftigt mellan paren (bygg testdatan så att
+  kvoten mellan medianerna skulle ge ett annat svar — det är hela poängen)
+
+- [ ] **Step 6: Mät om VAD parvis**
+
+Run: `venv/bin/python3 -m bench.bench --label 01-vad-ab --ab "STT_VAD=1" --repeats 5`
+
+Expected: `llm_ms`-driftkvoten ligger nära 1,00 — LLM:et gör identiskt arbete
+i båda armarna, så allt annat än ~1,00 betyder att mätningen fortfarande är
+otillförlitlig och att `--repeats` behöver höjas. `stt_ms`-kvoten är VAD:s
+verkliga effekt.
+
+Rapportera den siffran som optimering 1:s resultat och notera i rapporten hur
+den skiljer sig från de −20 % den okontrollerade jämförelsen gav.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add backend/server.py bench/bench.py bench/report.py bench/tests/test_report_ab.py bench/results/01-vad-ab.json
+git commit -m "Measure optimizations as paired A/B runs to cancel machine load drift"
+```
+
+### Följd för optimering 2-9
+
+Varje kvarvarande optimering env-gatas på samma sätt och mäts med `--ab` i
+stället för `--compare`. `--compare` finns kvar för att jämföra körningar över
+tid, men är inte längre hur en optimering bedöms.
