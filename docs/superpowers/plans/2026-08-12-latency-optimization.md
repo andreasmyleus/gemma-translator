@@ -1836,6 +1836,13 @@ git commit -m "Allow padding Whisper to audio length plus a margin"
 
 ## Task 10: Optimering 3 — trådar och dekodningsflaggor
 
+> **STRUKEN.** Två STT-optimeringar är mätta och båda är nollresultat, och
+> mekanismen är förstådd: Whispers kostnad är ett encoder-pass med fast
+> storlek (se Task 9). Dekodningsflaggor är det minst lovande som återstår,
+> och den kvarvarande insatsen läggs på strömningen i stället, eftersom den
+> träffar kampanjens huvudmått.
+
+
 **Files:**
 - Modify: `backend/server.py` (`get_whisper_model`, `transcribe`)
 
