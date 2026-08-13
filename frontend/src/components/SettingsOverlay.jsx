@@ -155,7 +155,14 @@ export default function SettingsOverlay({
           <datalist id="model-suggestions">
             <option value="gemma4-e2b"></option>
             <option value="gemma-4-2b"></option>
+            <option value="gemma4-e2b,gpu"></option>
           </datalist>
+          <p className="keyboard-help-note">
+            Try "gemma4-e2b,gpu" if your machine has a supported GPU. Much
+            faster on long utterances, but the first request takes ~7s while
+            the weights load, and it words translations slightly differently
+            from the CPU build.
+          </p>
         </div>
 
         <div className="form-group">

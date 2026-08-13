@@ -110,6 +110,35 @@ word moves a single fixture's WER by 3 to 33 points, so a per-fixture threshold
 would be zero tolerance wearing a percentage sign. Results are committed to
 `bench/results/` as a history of the optimization campaign.
 
+### The GPU model variant (Mac only, opt-in)
+
+On machines with a supported GPU, litert-lm also serves the same weights as
+`gemma4-e2b,gpu`. Point the model name in Settings at it, or measure it with
+`--ab-model "gemma4-e2b,gpu"`. It is **not the default**: the deployment target
+is a Raspberry Pi 5, which has no such build.
+
+Measured as a paired A/B run against the CPU build
+(`bench/results/09-gpu-model.json`, 5 repeats, ABBA-interleaved). **The win is
+concentrated in long utterances**, which is what a token-throughput win looks
+like — the GPU speeds up generation, so the more tokens the answer has, the more
+it saves, while short answers stay dominated by fixed per-request overhead:
+
+| Fixtures | `llm_ms` GPU/CPU | Reading |
+| :--- | ---: | :--- |
+| long (3 fixtures) | 0.366 / 0.372 / 0.399 | ~2.7× faster, unambiguous |
+| short and medium (6) | 0.75–1.05 | no clear effect at this run's noise floor |
+
+Two caveats before switching:
+
+- **The first request costs about 7 seconds** while the GPU weights load. Every
+  request after that is warm.
+- **The two builds do not produce identical translations.** Same weights, but a
+  different numerical path: 4 of 9 fixtures came out worded differently (e.g.
+  "how I get to the station" vs "how to get to the station"). The differences
+  look benign, and corpus WER is unchanged at 0.091 — but WER scores
+  *transcription*, not translation, so it cannot catch this. Switching to the
+  GPU build changes translation behaviour as well as speed.
+
 ## Latency notes & ideas
 
 A typical push-to-talk round trip is ~7s today. Rough split on this Mac (CPU, Whisper `small` int8):
