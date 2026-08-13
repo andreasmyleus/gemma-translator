@@ -19,6 +19,7 @@ from bench.frontend_mirror import (
     parse_translation,
     split_text_into_speech_chunks,
     system_prompt,
+    system_prompt_plain,
 )
 
 
@@ -61,6 +62,22 @@ class TestSystemPrompt(unittest.TestCase):
     def test_demands_bare_json_object(self):
         prompt = system_prompt("Swedish", "English")
         self.assertIn('"translation"', prompt)
+
+
+class TestSystemPromptPlain(unittest.TestCase):
+    def test_uses_first_word_of_language_names(self):
+        prompt = system_prompt_plain("Swedish (Source)", "English (Translation)")
+        self.assertIn("from Swedish into English", prompt)
+        self.assertNotIn("(Source)", prompt)
+
+    def test_asks_for_bare_translation_without_json(self):
+        prompt = system_prompt_plain("Swedish", "English")
+        self.assertNotIn("JSON", prompt)
+        self.assertNotIn("translation\":", prompt)
+
+    def test_stays_short(self):
+        # Prompten prefillas vid varje anrop; håll den kort.
+        self.assertLess(len(system_prompt_plain("Swedish", "English")), 200)
 
 
 class TestBuildLlmPayload(unittest.TestCase):

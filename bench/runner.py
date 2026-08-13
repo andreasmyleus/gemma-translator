@@ -77,8 +77,8 @@ def _post_stt(api_base, samples, language):
     return response.json().get("text", ""), elapsed_ms, len(payload_b64)
 
 
-def _post_llm(api_base, llm_url, model, text, src_lang, dst_lang):
-    prompt = system_prompt(LANGUAGE_NAMES[src_lang], LANGUAGE_NAMES[dst_lang])
+def _post_llm(api_base, llm_url, model, text, src_lang, dst_lang, prompt_fn=system_prompt):
+    prompt = prompt_fn(LANGUAGE_NAMES[src_lang], LANGUAGE_NAMES[dst_lang])
     payload = build_llm_payload(text, model, prompt)
     proxied = f"{api_base}/proxy?url={urllib.parse.quote(llm_url, safe='')}"
     started = time.perf_counter()
@@ -102,7 +102,7 @@ def _get_tts(api_base, text, language):
     return elapsed_ms
 
 
-def run_fixture(api_base, llm_url, model, fixture_id, spec):
+def run_fixture(api_base, llm_url, model, fixture_id, spec, prompt_fn=system_prompt):
     result = RunResult(fixture_id=fixture_id)
     try:
         samples = load_pcm_16k(ensure_wav(fixture_id, spec))
@@ -118,7 +118,13 @@ def run_fixture(api_base, llm_url, model, fixture_id, spec):
             raise ValueError("STT gav tom transkription")
 
         result.translation, result.llm_ms = _post_llm(
-            api_base, llm_url, model, result.transcript, spec["lang"], spec["target"]
+            api_base,
+            llm_url,
+            model,
+            result.transcript,
+            spec["lang"],
+            spec["target"],
+            prompt_fn,
         )
 
         chunks = split_text_into_speech_chunks(result.translation)
@@ -136,7 +142,7 @@ def run_fixture(api_base, llm_url, model, fixture_id, spec):
     return result
 
 
-def warmup(api_base, llm_url, model, fixtures):
+def warmup(api_base, llm_url, model, fixtures, prompt_fn=system_prompt):
     """Kör en runda per språkpar utan att mäta.
 
     Första anropet per Piper-röst laddar modellen från disk, och första
@@ -150,6 +156,6 @@ def warmup(api_base, llm_url, model, fixtures):
             continue
         seen.add(pair)
         print(f"[warmup] {fixture_id} ({spec['lang']}→{spec['target']})", flush=True)
-        result = run_fixture(api_base, llm_url, model, fixture_id, spec)
+        result = run_fixture(api_base, llm_url, model, fixture_id, spec, prompt_fn)
         if not result.ok:
             raise RuntimeError(f"Uppvärmningen misslyckades för {fixture_id}: {result.error}")

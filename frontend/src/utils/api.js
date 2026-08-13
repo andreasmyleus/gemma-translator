@@ -82,9 +82,10 @@ function generatePayloadJSON(transcribedText, model, systemPrompt) {
   return JSON.stringify({ model: model || "gemma4-e2b", messages })
 }
 
-// Chat-completions request. The system prompt demands a bare
-// {"translation": ...} JSON object; we still tolerate ``` fences and fall
-// back to the raw reply text if parsing fails.
+// Chat-completions request. The system prompt asks for a bare translation
+// (no JSON wrapper) to keep prefill and output short, but we still tolerate
+// a legacy {"translation": ...} reply (``` fences included) and fall back to
+// the raw reply text if parsing fails.
 export async function translateText(transcribedText, config) {
   const { endpointUrl, useProxy, apiKey, modelName, systemPrompt } = config
   const baseUrl = getNormalizedBaseUrl(endpointUrl)

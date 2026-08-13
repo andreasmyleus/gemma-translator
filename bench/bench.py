@@ -31,6 +31,7 @@ import time
 import requests
 
 from bench.fixtures import load_fixtures
+from bench.frontend_mirror import system_prompt, system_prompt_plain
 from bench.report import (
     aggregate_paired_ratios,
     build_report,
@@ -47,6 +48,11 @@ REPO_DIR = BENCH_DIR.parent
 RESULTS_DIR = BENCH_DIR / "results"
 
 BACKEND_STARTUP_TIMEOUT = 180
+
+# Namngivna promptvarianter för --ab-prompt. Arm A använder alltid
+# system_prompt (den oförändrade JSON-wrappern); nyckeln här väljer vad
+# arm B använder i stället.
+PROMPT_VARIANTS = {"plain": system_prompt_plain}
 
 
 def start_backend(port, extra_env=None):
@@ -104,7 +110,7 @@ def load_result(label):
         return json.load(handle)
 
 
-def run_ab(args, fixtures, ab_env, model_b):
+def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None):
     """Kör arm A (oförändrad miljö) och arm B (`ab_env` ovanpå) varvat, ABBA.
 
     Varvningen är poängen: ett par mätt inom sekunder av varandra delar
@@ -117,10 +123,16 @@ def run_ab(args, fixtures, ab_env, model_b):
     väljs per anrop via `--model`-argumentet till `run_fixture`, inte av
     backend-processens miljö — `--ab`s KEY=VAL-mekanism kan inte uttrycka
     det.
+
+    `prompt_variant` väljer arm B:s systemprompt (`--ab-prompt`, en nyckel i
+    PROMPT_VARIANTS, t.ex. "plain"). Skild av samma skäl som `model_b`:
+    prompten byggs i bench:s egen process av frontend_mirror.system_prompt,
+    inte av backend-processens miljö, så `--ab` kan inte uttrycka det.
     """
     api_base_a = f"http://localhost:{args.api_port}"
     api_base_b = f"http://localhost:{args.api_port + 1}"
     llm_url = f"http://localhost:{args.llm_port}/v1/chat/completions"
+    prompt_fn_b = PROMPT_VARIANTS[prompt_variant] if prompt_variant else system_prompt
 
     backend_a = start_backend(args.api_port)
     backend_b = start_backend(args.api_port + 1, extra_env=ab_env)
@@ -129,7 +141,9 @@ def run_ab(args, fixtures, ab_env, model_b):
         # Arm B värms med model_b, inte args.model — annars laddar litert-lm
         # fortfarande CPU-modellen i uppvärmningen och arm B:s första mätta
         # repetition bär GPU-buildens ~7 s vikt-laddningskostnad i stället.
-        warmup(api_base_b, llm_url, model_b, fixtures)
+        # Samma resonemang gäller prompt_fn_b: värm med den prompt som
+        # faktiskt mäts, inte standardprompten.
+        warmup(api_base_b, llm_url, model_b, fixtures, prompt_fn=prompt_fn_b)
 
         per_fixture_a, per_fixture_b, paired = {}, {}, {}
         for fixture_id, spec in fixtures.items():
@@ -141,7 +155,8 @@ def run_ab(args, fixtures, ab_env, model_b):
                 for arm in order:
                     base = api_base_a if arm == "a" else api_base_b
                     model = args.model if arm == "a" else model_b
-                    result = run_fixture(base, llm_url, model, fixture_id, spec)
+                    prompt_fn = system_prompt if arm == "a" else prompt_fn_b
+                    result = run_fixture(base, llm_url, model, fixture_id, spec, prompt_fn)
                     (runs_a if arm == "a" else runs_b).append(result)
                     print(
                         f"[bench] {fixture_id} {attempt + 1}/{args.repeats} arm {arm.upper()}: "
@@ -172,6 +187,8 @@ def run_ab(args, fixtures, ab_env, model_b):
         "ab_env": ab_env,
         "model_a": args.model,
         "model_b": model_b,
+        "prompt_a": "json",
+        "prompt_b": prompt_variant or "json",
         "arm_a": report_a,
         "arm_b": report_b,
         "paired": paired,
@@ -187,6 +204,8 @@ def run_ab(args, fixtures, ab_env, model_b):
     ab_note = dict(ab_env or {})
     if model_b != args.model:
         ab_note["model"] = f"{args.model} -> {model_b}"
+    if prompt_variant:
+        ab_note["prompt"] = f"json -> {prompt_variant}"
     print(render_markdown_ab(args.label, paired, drift, ab_note))
     print()
 
@@ -227,6 +246,19 @@ def main():
             "modell samtidigt) men inte med --compare, av samma skäl som --ab."
         ),
     )
+    parser.add_argument(
+        "--ab-prompt",
+        choices=sorted(PROMPT_VARIANTS),
+        help=(
+            "Kör en parvis A/B-mätning där arm B använder en annan systemprompt "
+            "än arm A, t.ex. \"plain\". Skild från --ab: prompten byggs i "
+            "bench:s egen process (frontend_mirror.system_prompt), inte av "
+            "backend-processens miljö eller modell-id:t, så varken --ab eller "
+            "--ab-model kan uttrycka den här ändringen — bara den startas i sitt "
+            "eget flagg. Kan kombineras med --ab och/eller --ab-model men inte "
+            "med --compare, av samma skäl som de."
+        ),
+    )
     parser.add_argument("--api-port", type=int, default=3100)
     parser.add_argument("--llm-port", type=int, default=9379)
     parser.add_argument("--model", default="gemma4-e2b")
@@ -246,6 +278,10 @@ def main():
         raise SystemExit(
             "--ab-model och --compare kan inte kombineras, av samma skäl som --ab."
         )
+    if args.ab_prompt and args.compare:
+        raise SystemExit(
+            "--ab-prompt och --compare kan inte kombineras, av samma skäl som --ab."
+        )
 
     fixtures = load_fixtures()
     if args.fixtures:
@@ -254,8 +290,14 @@ def main():
         if not fixtures:
             raise SystemExit(f"Inga fixturer matchade {args.fixtures!r}")
 
-    if args.ab or args.ab_model:
-        return run_ab(args, fixtures, parse_env_overrides(args.ab), args.ab_model or args.model)
+    if args.ab or args.ab_model or args.ab_prompt:
+        return run_ab(
+            args,
+            fixtures,
+            parse_env_overrides(args.ab),
+            args.ab_model or args.model,
+            args.ab_prompt,
+        )
 
     api_base = f"http://localhost:{args.api_port}"
     llm_url = f"http://localhost:{args.llm_port}/v1/chat/completions"

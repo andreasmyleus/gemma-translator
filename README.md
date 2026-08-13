@@ -151,12 +151,32 @@ A typical push-to-talk round trip is ~7s today. Rough split on this Mac (CPU, Wh
 
 Moonshine is ~4–7× faster than Whisper on 1–3s clips, but it has no Swedish/Finnish. It was long assumed that Whisper could close that gap by padding the mel spectrogram only to *audio length + ~5s silence* instead of a fixed 30s. That was measured and **rejected** — see `bench/results/02-chunklen-ab.json`: a paired A/B run with a 5s margin moved `stt_ms` by 0.999 (B/A) against controls tight to within 1%, i.e. no effect at all, at identical corpus WER. `faster_whisper`'s `chunk_length` parameter does shorten the spectrogram (`n_samples` and `nb_max_frames` drop as expected), but CTranslate2's Whisper encoder takes a fixed-size input, so `pad_or_trim` pads the mel back out before the encoder runs. Shortening it saves only the mel computation, which is negligible next to the encoder pass. Moonshine wins because its *encoder* is variable-length, not because of padding arithmetic — so no padding trick will reproduce that win here.
 
+### The system prompt is a latency cost — there is a context cliff
+
+**If you edit the system prompt in `frontend/src/TranslatorApp.jsx`, you are editing latency.** Keep it short, and keep `bench/frontend_mirror.py` in sync.
+
+Replacing the old ~430-character JSON-wrapper prompt with a ~144-character plain-text one cut `llm_ms` by 38% overall and made long utterances **2.6× faster** — see `bench/results/05-plain-prompt.json`. The reason is *not* the ~10 output tokens of `{"translation": "..."}` saved. Padding the short prompt back out to 430 characters with neutral filler, holding the instruction and the generated output byte-identical, reproduces the full slowdown (2061 ms → 5066 ms). The cost is the prompt's **length**, not the wrapper.
+
+But it is a threshold, not a per-character rate. Sweeping prompt length at a fixed long input and 155-character output:
+
+| System prompt | Approx. total context | Median |
+| ---: | ---: | ---: |
+| 144–415 chars | 451–722 chars | ~1700–1780 ms |
+| 425 chars | 728 chars | 4772 ms |
+| 432 chars | 739 chars | 4648 ms |
+
+Flat across 271 extra characters, then a 2.6× cliff between ~722 and ~728 characters of **total context — system prompt + user input + generated output combined**. Below the cliff, prompt length is genuinely free: tripling the prompt while generating a 29- or 60-character reply costs nothing measurable (−29 ms and −24 ms, i.e. noise). Above it, the same 288 characters cost ~2900 ms.
+
+So a long system prompt is harmless on short utterances and brutal on long ones, because only long utterances push the total past the boundary. That is exactly why the win concentrated on the long fixtures. `litert-lm serve` runs with no explicit context or cache flag (`start.sh:44`), so this is a default; the exact token boundary behind the ~725-character figure has not been identified.
+
+Practical consequence: further shortening the prompt does not speed up requests that already sit below the cliff — it raises the utterance length at which you fall off it.
+
 ### Ideas worth trying next (not implemented)
 
 Ordered by expected impact on perceived latency:
 
 1. **Whisper `cpu_threads`** — the untested half of the old "short padding + `cpu_threads`" idea. The short-padding half was measured and gave nothing (see above), so expectations here should be modest.
-2. **Drop the JSON wrapper on Gemma** — ask for plain translation text instead of `{"translation":"..."}`. Fewer output tokens; the UI already falls back if JSON parse fails.
+2. **Shorten the system prompt further** — the JSON wrapper is already gone (see the context-cliff section above). Remaining headroom is bounded: below the cliff prompt length is free, so this buys a longer utterance before the 2.6× penalty hits, not a general speedup.
 3. **Stream Gemma → TTS** — synthesize/play the first sentence while the rest generates. Cuts perceived wait by 1–3s even if wall time is unchanged (needs LiteRT streaming + sentence buffering).
 4. **Prefetch TTS chunk N+1 while chunk N plays** — `playTTS` today fetches the next chunk only after `onended`.
 5. **Whisper decode flags** — `without_timestamps=True`, `condition_on_previous_text=False` alongside `cpu_threads` (~0.2s, stabler short clips).
@@ -164,7 +184,7 @@ Ordered by expected impact on perceived latency:
 7. **Binary PCM upload** instead of base64 Float32 — tiny on 2–3s clips; more relevant on a Pi.
 8. **Lighter Piper voices** (`…-low` / `…-x_low`) — TTS is already ~0.1s; mainly a Pi memory/CPU win at some quality cost.
 
-Suggested build order: (1)+(5) together, then (2), then (3) if it still feels slow.
+Suggested build order: (1)+(5) together, then (3) if it still feels slow.
 
 ## Raspberry Pi Appliance Deployment
 

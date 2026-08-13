@@ -22,7 +22,7 @@ Speglar:
   frontend/src/utils/api.js:154-168  splitTextIntoSpeechChunks
   frontend/src/utils/api.js:72-83    generatePayloadJSON
   frontend/src/utils/api.js:126-144  JSON-uttolkningen i translateText
-  frontend/src/TranslatorApp.jsx:229 systemprompten i processTranslation
+  frontend/src/TranslatorApp.jsx:253 systemprompten i processTranslation
 
 Ändras någon av dem måste den här filen ändras i samma commit.
 """
@@ -56,7 +56,10 @@ def split_text_into_speech_chunks(text, limit=SPEECH_CHUNK_LIMIT):
 
 
 def system_prompt(src_name, dst_name):
-    """Speglar prompten som byggs i TranslatorApp.jsx:229 (processTranslation)."""
+    """Speglar prompten som byggs i TranslatorApp.jsx:253 (processTranslation).
+
+    JSON-wrapper-varianten. Detta är standardprompten (arm A i --ab-prompt).
+    """
     src = src_name.split(" ")[0]
     dst = dst_name.split(" ")[0]
     return (
@@ -70,6 +73,23 @@ def system_prompt(src_name, dst_name):
         f"Do NOT return anything else except this JSON object. No Markdown block "
         f"wraps (no ```json), no introductory text, no conversational text. Start "
         f'directly with "{{" and end directly with "}}".'
+    )
+
+
+def system_prompt_plain(src_name, dst_name):
+    """Kort systemprompt utan JSON-wrapper — kandidat för `--ab-prompt plain`.
+
+    Ingen ändring behövs i `parse_translation`: den faller redan tillbaka på
+    rå text när svaret inte är JSON, så ett vanligt textsvar tolkas rätt utan
+    vidare. Om den här varianten mäts snabbare och håller översättnings-
+    kvaliteten ska frontend/src/TranslatorApp.jsx bytas i samma commit.
+    """
+    src = src_name.split(" ")[0]
+    dst = dst_name.split(" ")[0]
+    return (
+        f"Translate the user's text from {src} into {dst}. "
+        f"Reply with the translation only — no explanations, no alternatives, "
+        f"no quotes, no preamble."
     )
 
 
