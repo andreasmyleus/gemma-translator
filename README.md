@@ -341,12 +341,12 @@ The app has two lanes (two people facing each other on the kiosk):
 Each lane has a rotating language "revolver" and records speech, which is transcribed (Whisper STT), translated (Gemma), and spoken back in the other lane's language (Piper TTS).
 
 ### Landscape Mode (default) — "active person"
-One lane is the **active person** at a time. The active lane is framed with **corner brackets on all four corners**. You drive everything from a single set of keys and switch focus with Space.
+One lane is the **active person** at a time. The active lane is framed with **corner brackets on all four corners**. You drive everything from a single set of keys and switch focus with Enter.
 
 | Key | Action | Description |
 | :--- | :--- | :--- |
-| **Spacebar** | Switch active person | Toggles the active lane (Person 1 ⇄ Person 2). Disabled while recording. |
-| **Z** | Record (push-to-talk) | Hold to record the **active** person; release to transcribe & translate. |
+| **Enter** | Switch active person | Toggles the active lane (Person 1 ⇄ Person 2). Disabled while recording. |
+| **Spacebar** | Record (push-to-talk) | Hold to record the **active** person; release to transcribe & translate. |
 | **← Left Arrow** | Previous language | Rotates the **active** person's language backward. |
 | **→ Right Arrow** | Next language | Rotates the **active** person's language forward. |
 
@@ -380,7 +380,7 @@ Open **Settings (⚙)** → **Keyboard Mode** → choose **Landscape** or **Vert
 
 | Setting value | Mode |
 | :--- | :--- |
-| `landscape` | Active-person scheme (Space / Z / ← →) — default |
+| `landscape` | Active-person scheme (Enter / Space / ← →) — default |
 | `vertical` | Two-hand scheme (Z / X / ← → / − +) |
 
 ### Credits

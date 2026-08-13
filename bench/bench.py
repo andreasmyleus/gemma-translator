@@ -70,7 +70,11 @@ def assert_port_free(port):
     # bindningen ändå — SO_REUSEADDR tillåter inte det, bara SO_REUSEPORT gör.
     probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        probe.bind(("127.0.0.1", port))
+        # Wildcard, inte 127.0.0.1: backendens TCPServer binder ("", PORT), och
+        # på macOS/BSD tillåts en adress-specifik bindning ovanpå en wildcard-
+        # bindning. En 127.0.0.1-probe rapporterade därför "ledig" mot en
+        # körande backend, vilket är precis det fall kontrollen finns för.
+        probe.bind(("", port))
     except OSError as err:
         if err.errno in (errno.EADDRINUSE, errno.EACCES):
             raise SystemExit(

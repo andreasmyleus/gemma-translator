@@ -36,7 +36,7 @@ class TestAssertPortFree(unittest.TestCase):
 
     def test_occupied_port_fails_loudly(self):
         listener = socket.socket()
-        listener.bind(("127.0.0.1", 0))
+        listener.bind(("", 0))
         listener.listen(1)
         port = listener.getsockname()[1]
         try:
@@ -52,7 +52,7 @@ class TestAssertPortFree(unittest.TestCase):
         kördes mot arm A:s process — alla kvoter ~1,000, alltså exakt vad "ingen
         effekt" ser ut som."""
         listener = socket.socket()
-        listener.bind(("127.0.0.1", 0))
+        listener.bind(("", 0))
         listener.listen(1)
         port = listener.getsockname()[1]
         try:

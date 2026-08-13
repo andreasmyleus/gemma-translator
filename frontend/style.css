@@ -64,18 +64,11 @@ body {
   flex-shrink: 0;
 }
 
-@media (min-width: 481px) {
-  html,
-  body {
-    cursor: auto;
-  }
-
-  #root {
-    border: 1px solid var(--border-color);
-  }
-}
-
-/* App Wrapper - hardcoded 480x320 landscape */
+/* App Wrapper - 480x320 landscape on the kiosk; grows above the 481px
+   breakpoint (see the media block at the end of this file).
+   Single column grid: row 1 is the display area, row 2 the fixed controls.
+   The transcript and the response drawer both sit in row 1, so the drawer
+   overlays the transcript instead of pushing it out of flow. */
 .translator-envelope {
   position: relative;
   width: 480px;
@@ -84,8 +77,9 @@ body {
   max-height: 320px;
   background-color: var(--bg-black);
   overflow: hidden;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 .status-wrap-left {
@@ -155,6 +149,8 @@ body {
 
 /* Controls workspace – fixed height at bottom */
 .translator-workspace {
+  grid-row: 2;
+  grid-column: 1;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -470,9 +466,12 @@ body {
   color: var(--red-bright);
 }
 
-/* Chat Panel (fills remaining space below visualizer) */
+/* Chat Panel — overlays the transcript in the envelope's display row.
+   It shares row 1 with .transcript-view and wins on z-index, so showing or
+   dismissing it never reflows the transcript underneath. */
 .response-drawer {
-  flex: 1 1 0;
+  grid-row: 1;
+  grid-column: 1;
   width: 100%;
   background: var(--bg-black);
   z-index: 500;
@@ -480,6 +479,14 @@ body {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  opacity: 1;
+  transition: opacity 0.2s ease-out;
+}
+
+/* Dismissed: fades out and stops swallowing input, revealing the transcript. */
+.response-drawer:not(.active) {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .app-title {
@@ -599,6 +606,213 @@ body {
   text-align: center;
   padding-top: 2px;
   min-height: 10px;
+}
+
+/* ============================================================
+   Bilingual conversation transcript
+   These base rules ARE the single-column layout: the 480x320 kiosk and any
+   viewport under 900px. The two-column grid is the 900px media block at the
+   bottom of this file.
+   ============================================================ */
+
+/* Sits in the envelope's display row, underneath the response drawer. */
+.transcript-view {
+  grid-row: 1;
+  grid-column: 1;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-black);
+}
+
+/* Column headers only exist once there are columns (>= 900px). */
+.transcript-headers {
+  display: none;
+}
+
+.transcript-header {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--red-bright);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The scrolling element. min-height:0 is load-bearing: without it this flex
+   child will not shrink below its content and the scroll never engages. */
+.transcript-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--red-bright) var(--bg-black);
+}
+
+.transcript-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.transcript-scroll::-webkit-scrollbar-track {
+  background: var(--bg-black);
+}
+
+.transcript-scroll::-webkit-scrollbar-thumb {
+  background: var(--red-bright);
+  border-radius: 0;
+}
+
+/* Horizontal padding lives on the header row and on the grid rather than on
+   the scroll container, so the two stay column-aligned whether the headers are
+   rendered inside or outside the scrollport. */
+.transcript-grid {
+  display: flex;
+  flex-direction: column;
+  padding: 5px 8px 8px;
+}
+
+/* One turn. Single column: source cell stacked above translation cell. */
+.transcript-row {
+  display: flex;
+  flex-direction: column;
+}
+
+.transcript-row + .transcript-row {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border-color);
+}
+
+.transcript-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 1px 0 1px 6px;
+  border-left: 2px solid var(--border-color);
+}
+
+/* Speaker attribution reuses the lanes' own vocabulary: the palette is a
+   single ink colour, so lane one is the filled side (like .key-hint and the
+   recording inversion) and lane two the outlined one (like .rotator-arrow). */
+.transcript-row-lane1 .transcript-cell {
+  border-left-style: solid;
+}
+
+.transcript-row-lane2 .transcript-cell {
+  border-left-style: dashed;
+}
+
+.transcript-speaker {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0 3px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--bg-black);
+  background: var(--red-bright);
+}
+
+.transcript-row-lane2 .transcript-speaker {
+  color: var(--red-bright);
+  background: var(--bg-black);
+  border-color: var(--border-color);
+}
+
+/* Single column has no headers, so the tag is the only cue to the language. */
+.transcript-lang-tag {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--red-bright);
+  opacity: 0.6;
+}
+
+.transcript-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--red-bright);
+  word-break: break-word;
+  user-select: text;
+}
+
+/* In-flight rows stay fully lit; the pending cell carries the cursor. */
+.transcript-row-transcribing .transcript-cell,
+.transcript-row-translating .transcript-cell,
+.transcript-row-done .transcript-cell {
+  opacity: 1;
+}
+
+.transcript-row-empty .transcript-cell {
+  opacity: 0.55;
+}
+
+/* Waiting on Whisper/Gemma: blinking block cursor, the same
+   opacity-toggle idiom as .connection-indicator's recording pulse. */
+.transcript-pending::after {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 3px;
+  vertical-align: text-bottom;
+  background: var(--red-bright);
+  animation: blink-cursor 0.6s steps(1) infinite;
+}
+
+@keyframes blink-cursor {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.transcript-muted {
+  opacity: 0.55;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* The palette has no alert colour, so errors invert like the recording state. */
+.transcript-error {
+  background: var(--red-bright);
+  color: var(--bg-black);
+  padding: 0 4px;
+}
+
+.transcript-row-error .transcript-speaker {
+  background: var(--red-bright);
+  color: var(--bg-black);
+  border-color: var(--border-color);
+}
+
+/* Same treatment as .initial-placeholder, which it replaces. */
+.transcript-empty {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  color: var(--red-bright);
+  font-size: 14px;
+  font-weight: bold;
+  text-align: center;
+  text-transform: uppercase;
 }
 
 /* Collapsible Settings Fullscreen Overlay Form */
@@ -768,5 +982,116 @@ body {
   position: relative;
   width: 480px;
   height: 320px;
+}
+
+/* ============================================================
+   Breakpoints. Everything above is the 480x320 kiosk; the Raspberry Pi is
+   below both media queries, so its rendering is unchanged by construction.
+   These blocks live at the end of the file because they override the
+   hardcoded sizes above and media queries carry no extra specificity.
+   ============================================================ */
+
+/* Above the kiosk width the app stops being pinned to 480x320 and grows to
+   the viewport: #root, .app-container and .translator-envelope all follow the
+   window. Below 481px every one of them keeps its literal 480x320. */
+@media (min-width: 481px) {
+  html,
+  body {
+    cursor: auto;
+  }
+
+  #root {
+    width: 100%;
+    height: 100%;
+    border: 1px solid var(--border-color);
+  }
+
+  .app-container,
+  .translator-envelope {
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    max-height: none;
+  }
+}
+
+/* Two columns, one per language, aligned line by line. */
+@media (min-width: 900px) {
+  /* Sits outside .transcript-scroll, so it stays put without `sticky`. */
+  .transcript-headers {
+    z-index: 2;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 16px;
+    padding: 6px 12px;
+    background: var(--bg-black);
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .transcript-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 16px;
+    padding: 8px 12px 12px;
+  }
+
+  /* The row becomes a pass-through so its two cells are items of the outer
+     grid and land in the SAME grid row. Nesting a grid per row would let the
+     two languages drift apart vertically, which is the whole feature. */
+  .transcript-row {
+    display: contents;
+  }
+
+  .transcript-header-left,
+  .transcript-cell-left {
+    grid-column: 1;
+  }
+
+  .transcript-header-right,
+  .transcript-cell-right {
+    grid-column: 2;
+  }
+
+  /* display: contents means the row box is gone; the turn separator has to be
+     drawn by the cells instead. */
+  .transcript-row + .transcript-row .transcript-cell {
+    margin-top: 5px;
+    padding-top: 5px;
+    border-top: 1px solid var(--border-color);
+  }
+
+  /* The headers say which language each column is, so the per-line tag goes. */
+  .transcript-lang-tag {
+    display: none;
+  }
+
+  .transcript-cell {
+    padding-left: 8px;
+  }
+
+  .transcript-speaker {
+    font-size: 11px;
+  }
+
+  .transcript-text {
+    font-size: 16px;
+    line-height: 1.4;
+  }
+
+  .transcript-empty {
+    font-size: 18px;
+  }
+
+  /* The drawer now overlays a full-window transcript: keep its bubbles at a
+     readable measure instead of stretching them across the viewport. */
+  .chat-panel {
+    width: 100%;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+
+  .bubble-text {
+    font-size: 22px;
+  }
 }
 

@@ -18,6 +18,9 @@ import React from "react"
 
 // Result panel: transcription (left bubble) and translation (right bubble)
 // in a chat-style layout, with a first-run placeholder before any recording.
+// It sits as an overlay above the transcript, so it can be dismissed by
+// pressing Escape or clicking anywhere on the panel. Auto-dismissal is not
+// handled here — TranslatorApp owns TTS playback and therefore the timing.
 export default function ResponseDrawer({
   isActive,
   onClose,
@@ -31,10 +34,37 @@ export default function ResponseDrawer({
   // Determine if we have any data to show (or if the drawer was explicitly activated)
   const hasData = isActive || transcriptionSource !== ""
 
+  // Escape dismisses the overlay. Registered on window (not on the panel) so
+  // it works without the drawer ever holding focus — TranslatorApp's
+  // push-to-talk handlers live on window too and must keep receiving keys.
+  React.useEffect(() => {
+    if (!isActive) return
+    const handleKeyDown = (e) => {
+      if (e.key !== "Escape") return
+      if (typeof onClose === "function") onClose()
+    }
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [isActive, onClose])
+
+  const handleDismiss = () => {
+    if (!isActive) return
+    if (typeof onClose === "function") onClose()
+  }
+
+  // Swallow the mousedown so the click never moves focus (or starts a text
+  // selection). If focus landed on a control here, the next Space press would
+  // re-activate that control instead of starting a recording.
+  const handleMouseDown = (e) => {
+    e.preventDefault()
+  }
+
   return (
     <div
       className={`response-drawer ${isActive ? "active" : ""}`}
       id="response-drawer"
+      onClick={handleDismiss}
+      onMouseDown={handleMouseDown}
     >
       <div className="app-title">GEMLANG-1</div>
       <div
