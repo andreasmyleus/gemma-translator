@@ -469,26 +469,6 @@ body {
 /* Chat Panel — overlays the transcript in the envelope's display row.
    It shares row 1 with .transcript-view and wins on z-index, so showing or
    dismissing it never reflows the transcript underneath. */
-.response-drawer {
-  grid-row: 1;
-  grid-column: 1;
-  width: 100%;
-  background: var(--bg-black);
-  z-index: 500;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-  opacity: 1;
-  transition: opacity 0.2s ease-out;
-}
-
-/* Dismissed: fades out and stops swallowing input, revealing the transcript. */
-.response-drawer:not(.active) {
-  opacity: 0;
-  pointer-events: none;
-}
-
 .app-title {
   font-family: var(--font-mono) !important;
   text-align: left;
@@ -757,6 +737,10 @@ body {
   opacity: 0.55;
 }
 
+.transcript-row-cancelled .transcript-cell {
+  opacity: 0.45;
+}
+
 /* Waiting on Whisper/Gemma: blinking block cursor, the same
    opacity-toggle idiom as .connection-indicator's recording pulse. */
 .transcript-pending::after {
@@ -793,6 +777,15 @@ body {
   background: var(--red-bright);
   color: var(--bg-black);
   padding: 0 4px;
+}
+
+.transcript-error-banner {
+  padding: 8px 12px;
+  background: var(--red-bright);
+  color: var(--bg-black);
+  font-size: 12px;
+  font-weight: bold;
+  text-align: center;
 }
 
 .transcript-row-error .transcript-speaker {

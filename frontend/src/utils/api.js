@@ -82,9 +82,26 @@ function generatePayloadJSON(transcribedText, model, systemPrompt) {
   return JSON.stringify({ model: model || "gemma4-e2b", messages })
 }
 
-// Chat-completions request. The system prompt demands a bare
-// {"translation": ...} JSON object; we still tolerate ``` fences and fall
-// back to the raw reply text if parsing fails.
+// Tolerates ``` fences and falls back to the raw reply when the model didn't
+// return the JSON envelope the prompt asked for.
+function parseTranslation(modelResponse) {
+  let cleanJson = modelResponse.trim()
+  if (cleanJson.startsWith("```json")) cleanJson = cleanJson.slice(7)
+  if (cleanJson.startsWith("```")) cleanJson = cleanJson.slice(3)
+  if (cleanJson.endsWith("```")) cleanJson = cleanJson.slice(0, -3)
+  try {
+    return JSON.parse(cleanJson.trim()).translation || ""
+  } catch (e) {
+    return modelResponse
+  }
+}
+
+// Chat-completions request. The system prompt asks for a bare translation
+// (no JSON wrapper) to keep prefill and output short, but we still tolerate
+// a legacy {"translation": ...} reply (``` fences included) and fall back to
+// the raw reply text if parsing fails. The prompt is user-editable in
+// Settings, so that tolerance is reachable without a code change — see
+// translateTextStreaming for how the streaming path honours it.
 export async function translateText(transcribedText, config) {
   const { endpointUrl, useProxy, apiKey, modelName, systemPrompt } = config
   const baseUrl = getNormalizedBaseUrl(endpointUrl)
@@ -123,30 +140,99 @@ export async function translateText(transcribedText, config) {
     modelResponse = JSON.stringify(data, null, 2)
   }
 
-  let translationVal = ""
-  try {
-    let cleanJson = modelResponse.trim()
-    if (cleanJson.startsWith("```json")) {
-      cleanJson = cleanJson.slice(7)
-    }
-    if (cleanJson.startsWith("```")) {
-      cleanJson = cleanJson.slice(3)
-    }
-    if (cleanJson.endsWith("```")) {
-      cleanJson = cleanJson.slice(0, -3)
-    }
-    cleanJson = cleanJson.trim()
-
-    const parsed = JSON.parse(cleanJson)
-    translationVal = parsed.translation || ""
-  } catch (e) {
-    translationVal = modelResponse
-  }
+  const translationVal = parseTranslation(modelResponse)
 
   return {
     translation: translationVal,
     duration: requestDuration,
     tokens: data.usage?.total_tokens || 0,
+  }
+}
+
+// Streaming chat-completions. Calls `onText(fullTextSoFar)` after every delta
+// so the caller can start speaking sentence one while the rest generates.
+//
+// `onText` receives text that is safe to show and speak. A half-received
+// legacy envelope (`{"translation": "Hej.`) is neither: it cannot be parsed
+// yet, and speaking it verbatim is exactly what the tolerance in
+// `parseTranslation` exists to avoid. So when the reply opens like an
+// envelope, partials are suppressed entirely and the caller gets the parsed
+// text once, in the return value. `raw` is the unparsed accumulated text —
+// the caller can compare it with `translation` to tell whether the offsets it
+// accumulated while streaming still address the same string.
+//
+// Pass `signal` (an AbortSignal) to stop a superseded translation.
+export async function translateTextStreaming(
+  transcribedText,
+  config,
+  onText,
+  signal,
+) {
+  const { endpointUrl, useProxy, apiKey, modelName, systemPrompt } = config
+  const targetUrl = `${getNormalizedBaseUrl(endpointUrl)}/chat/completions`
+  const payload = JSON.parse(
+    generatePayloadJSON(transcribedText, modelName, systemPrompt),
+  )
+  payload.stream = true
+
+  const headers = { "Content-Type": "application/json" }
+  if (apiKey && apiKey.trim() !== "") {
+    headers["Authorization"] = `Bearer ${apiKey.trim()}`
+  }
+  const fetchUrl = useProxy
+    ? `/proxy?url=${encodeURIComponent(targetUrl)}`
+    : targetUrl
+
+  const startRequestTime = Date.now()
+  const response = await fetch(fetchUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    signal,
+  })
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(`API ${response.status}: ${errorText || response.statusText}`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let text = ""
+  // null until the first non-blank character decides it.
+  let isEnvelope = null
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    // Keep the last, possibly incomplete, line in the buffer.
+    const lines = buffer.split("\n")
+    buffer = lines.pop()
+    for (const line of lines) {
+      if (!line.startsWith("data:")) continue
+      const data = line.slice(5).trim()
+      if (!data || data === "[DONE]") continue
+      try {
+        const delta = JSON.parse(data).choices?.[0]?.delta?.content
+        if (delta) {
+          text += delta
+          const head = text.trimStart()
+          if (isEnvelope === null && head.length > 0) {
+            isEnvelope = head.startsWith("{") || head.startsWith("```")
+          }
+          if (isEnvelope === false && onText) onText(text)
+        }
+      } catch (e) {
+        // A malformed line is not worth aborting the stream over.
+      }
+    }
+  }
+
+  return {
+    translation: parseTranslation(text),
+    raw: text,
+    duration: ((Date.now() - startRequestTime) / 1000).toFixed(2),
   }
 }
 

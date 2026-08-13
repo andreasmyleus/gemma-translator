@@ -21,8 +21,9 @@ import React, { useCallback, useLayoutEffect, useRef } from "react"
 const STICK_TOLERANCE = 40
 
 // Which half of a turn belongs in a column: the transcription ("source"), the
-// translation ("target"), or nothing at all. The last case is a turn spoken in
-// a third language after the columns locked — an empty cell, not an error.
+// translation ("target"), or nothing at all. The last case is a turn whose
+// languages no longer match the current lane pair (e.g. after a rotate) —
+// an empty cell keeps the row aligned.
 function roleForColumn(turn, code) {
   if (!code) return null
   if (turn.sourceLang === code) return "source"
@@ -38,7 +39,11 @@ function errorRole(turn) {
 
 // The conversation history: every turn becomes one grid row with a cell per
 // language, so the two columns stay aligned line by line.
-export default function TranscriptView({ turns = [], columns = null }) {
+export default function TranscriptView({
+  turns = [],
+  columns = null,
+  micError = null,
+}) {
   const scrollRef = useRef(null)
   // Starts true so the very first turns scroll into view.
   const stuckToBottomRef = useRef(true)
@@ -75,8 +80,10 @@ export default function TranscriptView({ turns = [], columns = null }) {
     const showError =
       turn.status === "error" && turn.error && errorRole(turn) === role
     // "transcribing" waits on the source half, "translating" on the target one.
+    // Cancelled turns must not keep showing listening/translating.
     const showPending =
       !showError &&
+      turn.status !== "cancelled" &&
       !text &&
       ((isSource && turn.status === "transcribing") ||
         (!isSource && turn.status === "translating"))
@@ -84,6 +91,9 @@ export default function TranscriptView({ turns = [], columns = null }) {
     // recording registered. No translation was attempted, so the target side
     // stays blank.
     const showMuted = turn.status === "empty" && isSource
+    // Superseded / aborted before anything landed — muted dash, not pending.
+    const showCancelled =
+      turn.status === "cancelled" && !text && isSource && !showError
 
     return (
       <div className={`transcript-cell transcript-cell-${side}`}>
@@ -98,6 +108,7 @@ export default function TranscriptView({ turns = [], columns = null }) {
         {showMuted ? (
           <span className="transcript-muted">— no speech detected —</span>
         ) : null}
+        {showCancelled ? <span className="transcript-muted">—</span> : null}
         {showError ? (
           <span className="transcript-error">{turn.error}</span>
         ) : null}
@@ -107,7 +118,7 @@ export default function TranscriptView({ turns = [], columns = null }) {
 
   return (
     <div className="transcript-view">
-      {/* Headers exist only once the language pair has locked. */}
+      {/* Headers track the current lane languages. */}
       {columns ? (
         <div className="transcript-headers">
           <div className="transcript-header transcript-header-left">
@@ -135,7 +146,12 @@ export default function TranscriptView({ turns = [], columns = null }) {
           ))}
         </div>
       </div>
-      {turns.length === 0 ? (
+      {micError ? (
+        <div className="transcript-error-banner">
+          Microphone: {micError} (HTTPS is required from remote devices)
+        </div>
+      ) : null}
+      {turns.length === 0 && !micError ? (
         <div className="transcript-empty">Select languages, push to talk</div>
       ) : null}
     </div>

@@ -30,61 +30,58 @@ import ssl
 import threading
 from collections import OrderedDict
 
-# Multilingual STT via faster-whisper. One model covers every language, so unlike the
-# per-language engines below there is nothing to cache or evict.
+# Per-language STT/TTS with a shared Gemma for translation. STT and TTS each
+# keep an LRU of at most MAX_MODELS loaded checkpoints/voices so a Pi-class
+# box is not asked to hold every language at once.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # UI language codes we hand to Whisper directly; anything else gets auto-detected.
-# Any Whisper checkpoint works here, including Swedish-tuned ones (e.g. KBLab/kb-whisper-medium).
-SUPPORTED_STT_LANGS = {"sv", "fi", "en", "ar", "es", "ja", "zh", "ko"}
-WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small")
+SUPPORTED_STT_LANGS = {"sv", "fi", "en", "es", "fr"}
+# Fallback multilingual Whisper for every language that has no specialised entry
+# in STT_MODEL_MAP. Override with WHISPER_MODEL_SIZE.
+DEFAULT_STT_MODEL = os.environ.get("WHISPER_MODEL_SIZE", "small")
+# Per-language STT when a Hub id already ships CTranslate2 weights (faster-whisper
+# loads them without a local conversion). Override with STT_MODEL_<LANG>=small to
+# A/B against stock Whisper. Finnish uses a medium CT2 fine-tune; es/fr stay on
+# multilingual small (see README) but still accept env overrides.
+STT_MODEL_MAP = {
+    "sv": os.environ.get("STT_MODEL_SV", "KBLab/kb-whisper-small"),
+    "fi": os.environ.get("STT_MODEL_FI", "mpasila/faster-whisper-medium-finnish"),
+    "es": os.environ.get("STT_MODEL_ES", DEFAULT_STT_MODEL),
+    "fr": os.environ.get("STT_MODEL_FR", DEFAULT_STT_MODEL),
+}
+# Optimeringar hålls bakom flaggor så att bench kan A/B-testa dem i samma
+# körning, och så att produkten behåller sitt ursprungsbeteende tills en
+# ändring är uppmätt. Defaultarna flippas när kampanjen är klar.
+STT_VAD = os.environ.get("STT_VAD", "0") == "1"
 MAX_MODELS = 2
 # Loaded at startup so the two default lanes never stall on a first utterance.
 # Keep this within MAX_MODELS or the entries just evict each other.
 PREWARM_LANGS = ("sv", "en")
-_whisper_model = None
+_whisper_models = OrderedDict()  # model_id -> WhisperModel
 # RLock (reentrant): handle_stt holds the lock across get_whisper_model() + inference,
 # and get_whisper_model() re-acquires it on the same thread. A plain Lock() self-deadlocks.
 _stt_lock = threading.RLock()
 
-# Multilingual TTS via Piper, which is the only offline engine covering both Swedish and
-# Finnish. The voice is fixed at load, so we lazily build (and cache) one per language used.
+# Piper voices, one per UI language. The voice is fixed at load, so we lazily
+# build (and cache) one per language used, with the same MAX_MODELS LRU as STT.
 PIPER_VOICE_MAP = {
     "sv": "sv_SE-nst-medium",
     "fi": "fi_FI-harri-medium",
     "en": "en_US-lessac-medium",
-    "ar": "ar_JO-kareem-medium",
     "es": "es_ES-davefx-medium",
-    "zh": "zh_CN-huayan-medium",
-    "ko": "ko_KR-kss-medium",
-}
-# Piper has no Japanese voice, so `ja` alone still goes through moonshine-voice
-# (Kokoro / Piper backed). Maps our UI language codes -> moonshine-voice language codes.
-TTS_LANG_MAP = {
-    "ja": "ja-jp",
+    "fr": "fr_FR-siwis-medium",
 }
 PIPER_VOICE_DIR = os.environ.get(
     "PIPER_VOICE_DIR", os.path.join(os.path.expanduser("~"), ".local", "share", "piper-voices")
 )
 _piper_voices = OrderedDict()  # our-lang-code -> PiperVoice
-_tts_engines = OrderedDict()  # our-lang-code -> TextToSpeech
-# RLock (reentrant): handle_tts holds the lock across the loaders + synthesis, and the
-# loaders re-acquire it on the same thread. A plain Lock() self-deadlocks.
+# RLock (reentrant): handle_tts holds the lock across the loader + synthesis, and the
+# loader re-acquires it on the same thread. A plain Lock() self-deadlocks.
 _tts_lock = threading.RLock()
 
-def get_tts_engine(language):
-    with _tts_lock:
-        if language in _tts_engines:
-            _tts_engines.move_to_end(language)
-            return _tts_engines[language]
-        from moonshine_voice import TextToSpeech
-        moon_lang = TTS_LANG_MAP[language]
-        print(f"[TTS] Loading moonshine-voice (lang={language} -> {moon_lang})...")
-        if len(_tts_engines) >= MAX_MODELS:
-            oldest_lang, oldest_engine = _tts_engines.popitem(last=False)
-            print(f"[TTS] Evicting model for {oldest_lang}")
-            del oldest_engine
-        _tts_engines[language] = TextToSpeech(moon_lang)
-        return _tts_engines[language]
+def stt_model_for(language):
+    """Whisper checkpoint id for a UI language code."""
+    return STT_MODEL_MAP.get(language, DEFAULT_STT_MODEL)
 
 def get_piper_voice(language):
     with _tts_lock:
@@ -108,36 +105,58 @@ def get_piper_voice(language):
         _piper_voices[language] = PiperVoice.load(voice_dir / f"{voice_id}.onnx")
         return _piper_voices[language]
 
-def synthesize(text, language):
-    """Synthesize `text` and return (mono float32 samples in [-1, 1], sample_rate)."""
-    if language in TTS_LANG_MAP:
-        return get_tts_engine(language).synthesize(text)
+def synthesize(text, language, syn_config=None):
+    """Synthesize `text` and return (mono float32 samples in [-1, 1], sample_rate).
+
+    `syn_config` is an optional piper SynthesisConfig handed straight to Piper.
+    Leaving it None keeps the product's default voice settings; bench/ passes one
+    with the noise scales zeroed, because Piper's VITS decoder otherwise samples
+    fresh noise per call and no two renderings of the same text are alike.
+    """
     if language not in PIPER_VOICE_MAP:
         language = "en"
-    chunks = list(get_piper_voice(language).synthesize(text))
+    # syn_config=None is what PiperVoice.synthesize already defaults to, so the
+    # product path stays byte-identical to before this parameter existed.
+    chunks = list(get_piper_voice(language).synthesize(text, syn_config))
     pcm = b"".join(c.audio_int16_bytes for c in chunks)
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0, chunks[0].sample_rate
 
-def get_whisper_model():
-    global _whisper_model
+def get_whisper_model(model_id=None):
+    """Load (or reuse) a faster-whisper checkpoint. LRU-evicts past MAX_MODELS."""
+    model_id = model_id or DEFAULT_STT_MODEL
     with _stt_lock:
-        if _whisper_model is None:
-            from faster_whisper import WhisperModel
-            print(f"[STT] Loading faster-whisper ({WHISPER_MODEL_SIZE}, int8)...")
-            _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
-        return _whisper_model
+        if model_id in _whisper_models:
+            _whisper_models.move_to_end(model_id)
+            return _whisper_models[model_id]
+        from faster_whisper import WhisperModel
+        print(f"[STT] Loading faster-whisper ({model_id}, int8)...")
+        if len(_whisper_models) >= MAX_MODELS:
+            oldest_id, oldest_model = _whisper_models.popitem(last=False)
+            print(f"[STT] Evicting model {oldest_id}")
+            del oldest_model
+        _whisper_models[model_id] = WhisperModel(
+            model_id, device="cpu", compute_type="int8"
+        )
+        return _whisper_models[model_id]
 
 def transcribe(audio_np, language):
     """Transcribe 16 kHz mono float32 samples. Unknown languages are auto-detected."""
-    segments, _ = get_whisper_model().transcribe(
+    model_id = stt_model_for(language) if language in SUPPORTED_STT_LANGS else DEFAULT_STT_MODEL
+    segments, _ = get_whisper_model(model_id).transcribe(
         audio_np,
         language=language if language in SUPPORTED_STT_LANGS else None,
         beam_size=1,
+        # Klipper bort tystnad före dekodning. Kortar ljudet som når modellen
+        # och tar bort de hallucinationer stock-Whisper gärna producerar på
+        # tysta partier.
+        vad_filter=STT_VAD,
     )
     return " ".join(s.text.strip() for s in segments)
 
 
-PORT = 3000
+# Överskrivbar så att bench/ kan köra en egen instans parallellt med en
+# vanlig utvecklingsserver på 3000.
+PORT = int(os.environ.get("PORT", 3000))
 
 class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     def end_headers(self):
@@ -191,30 +210,68 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             if key.lower() not in ['host', 'connection', 'content-length', 'x-target-url']:
                 req.add_header(key, val)
 
+        headers_sent = False
         try:
             with urllib.request.urlopen(req, timeout=300) as response:
-                res_body = response.read()
                 self.send_response(response.status)
-                # Forward response headers
+                # Content-Length droppas: vi vet inte längden i förväg när vi
+                # strömmar, och HTTP/1.0-svar avslutas ändå av connection close.
                 for key, val in response.headers.items():
-                    if key.lower() not in ['content-length', 'connection']:
+                    if key.lower() not in ['content-length', 'connection', 'transfer-encoding']:
                         self.send_header(key, val)
                 self.end_headers()
-                self.wfile.write(res_body)
+                headers_sent = True
+                # Skriv vidare chunk för chunk i stället för att buffra hela
+                # svaret — annars kan klienten inte se en SSE-delta förrän
+                # genereringen är klar, och strömningen är meningslös.
+                #
+                # read1, inte read: read(n) är "läs tills du har n byte eller
+                # strömmen tar slut" och blockerar alltså tills flera SSE-event
+                # har hunnit samlas. litert-lms event är ~200 byte, så
+                # read(1024) buntade ihop 4–5 tokens per utskrivning. Uppmätt
+                # mot den riktiga kedjan (sv-multi, 5 anrop vardera): första
+                # eventet 488 ms med read(1024) mot 420 ms med read1, och
+                # första hela meningen 912 ms mot 809 ms. read1 returnerar det
+                # som redan ligger i bufferten, så varje event går vidare i
+                # samma ögonblick det kommer in.
+                while True:
+                    chunk = response.read1(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
         except urllib.error.HTTPError as e:
             print(f"[Proxy Error] HTTP Error {e.code}: {e.reason}")
             try:
                 res_body = e.read()
             except Exception:
                 res_body = str(e).encode('utf-8')
-            self.send_response(e.code)
-            self.end_headers()
-            self.wfile.write(res_body)
+            self._proxy_error(headers_sent, e.code, res_body)
         except Exception as e:
             print(f"[Proxy Error] Exception: {e}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(str(e).encode('utf-8'))
+            self._proxy_error(headers_sent, 500, str(e).encode('utf-8'))
+
+    def _proxy_error(self, headers_sent, status, body):
+        """Rapporterar ett proxyfel utan att skada ett redan påbörjat svar.
+
+        Två fällor som båda utlöses först när strömningen har börjat:
+        statusraden är redan skickad, så ett andra `send_response` skulle
+        injicera "HTTP/1.0 500 ..." mitt i SSE-kroppen och förvirra klientens
+        parser; och felet är ofta just att klienten gick sin väg
+        (BrokenPipeError/ConnectionResetError), så själva felskrivningen
+        kastar igen och eskalerar till en traceback ur handlern.
+        """
+        try:
+            if not headers_sent:
+                self.send_response(status)
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                # Kroppen är redan påbörjad. Det enda ärliga vi kan göra är
+                # att avsluta strömmen; klienten ser ett trunkerat svar.
+                self.close_connection = True
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def handle_tts(self):
         parsed_path = urllib.parse.urlparse(self.path)
@@ -534,13 +591,12 @@ if __name__ == '__main__':
         print(f"===========================================================")
         def _prewarm_models():
             try:
-                get_whisper_model()
                 for lang in PREWARM_LANGS:
-                    print(f"[Prewarm] Loading {lang} voice into memory...", flush=True)
-                    if lang in TTS_LANG_MAP:
-                        get_tts_engine(lang)
-                    else:
-                        get_piper_voice(lang)
+                    model_id = stt_model_for(lang)
+                    print(f"[Prewarm] Loading STT {lang} -> {model_id}...", flush=True)
+                    get_whisper_model(model_id)
+                    print(f"[Prewarm] Loading {lang} Piper voice into memory...", flush=True)
+                    get_piper_voice(lang)
                 print("[Prewarm] Models pre-warmed successfully.", flush=True)
             except Exception as e:
                 print(f"[Prewarm Error] {e}", flush=True)

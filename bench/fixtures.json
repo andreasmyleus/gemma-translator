@@ -1,0 +1,42 @@
+{
+  "sv-short": {
+    "lang": "sv", "target": "en", "target_s": 1.5,
+    "text": "Var ligger stationen?"
+  },
+  "sv-medium": {
+    "lang": "sv", "target": "en", "target_s": 3.6,
+    "text": "Ursäkta, kan du berätta hur jag tar mig till stationen härifrån?"
+  },
+  "sv-long": {
+    "lang": "sv", "target": "en", "target_s": 10.1,
+    "text": "Jag skulle behöva boka ett rum för två nätter, helst med utsikt mot havet, och jag undrar också om frukosten ingår i priset eller om den kostar extra."
+  },
+  "fi-short": {
+    "lang": "fi", "target": "en", "target_s": 1.3,
+    "text": "Missä asema on?"
+  },
+  "fi-medium": {
+    "lang": "fi", "target": "en", "target_s": 4.0,
+    "text": "Anteeksi, voisitko kertoa miten pääsen asemalle täältä?"
+  },
+  "fi-long": {
+    "lang": "fi", "target": "en", "target_s": 9.8,
+    "text": "Haluaisin varata huoneen kahdeksi yöksi, mieluiten merinäköalalla, ja haluaisin myös tietää sisältyykö aamiainen hintaan vai maksaako se erikseen."
+  },
+  "en-short": {
+    "lang": "en", "target": "sv", "target_s": 1.1,
+    "text": "Where is the station?"
+  },
+  "en-medium": {
+    "lang": "en", "target": "sv", "target_s": 3.3,
+    "text": "Excuse me, could you tell me how to get to the station from here?"
+  },
+  "en-long": {
+    "lang": "en", "target": "sv", "target_s": 7.6,
+    "text": "I would like to book a room for two nights, preferably with a view of the sea, and I also want to know whether breakfast is included in the price or costs extra."
+  },
+  "sv-multi": {
+    "lang": "sv", "target": "en", "target_s": 9.2,
+    "text": "Jag skulle behöva boka ett rum för två nätter. Kan du också berätta om frukosten ingår i priset? Jag undrar också var närmaste bankomaten ligger."
+  }
+}
