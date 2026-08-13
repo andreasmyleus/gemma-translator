@@ -215,6 +215,7 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             if key.lower() not in ['host', 'connection', 'content-length', 'x-target-url']:
                 req.add_header(key, val)
 
+        headers_sent = False
         try:
             with urllib.request.urlopen(req, timeout=300) as response:
                 self.send_response(response.status)
@@ -224,11 +225,22 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     if key.lower() not in ['content-length', 'connection', 'transfer-encoding']:
                         self.send_header(key, val)
                 self.end_headers()
+                headers_sent = True
                 # Skriv vidare chunk för chunk i stället för att buffra hela
                 # svaret — annars kan klienten inte se en SSE-delta förrän
                 # genereringen är klar, och strömningen är meningslös.
+                #
+                # read1, inte read: read(n) är "läs tills du har n byte eller
+                # strömmen tar slut" och blockerar alltså tills flera SSE-event
+                # har hunnit samlas. litert-lms event är ~200 byte, så
+                # read(1024) buntade ihop 4–5 tokens per utskrivning. Uppmätt
+                # mot den riktiga kedjan (sv-multi, 5 anrop vardera): första
+                # eventet 488 ms med read(1024) mot 420 ms med read1, och
+                # första hela meningen 912 ms mot 809 ms. read1 returnerar det
+                # som redan ligger i bufferten, så varje event går vidare i
+                # samma ögonblick det kommer in.
                 while True:
-                    chunk = response.read(1024)
+                    chunk = response.read1(65536)
                     if not chunk:
                         break
                     self.wfile.write(chunk)
@@ -239,14 +251,32 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 res_body = e.read()
             except Exception:
                 res_body = str(e).encode('utf-8')
-            self.send_response(e.code)
-            self.end_headers()
-            self.wfile.write(res_body)
+            self._proxy_error(headers_sent, e.code, res_body)
         except Exception as e:
             print(f"[Proxy Error] Exception: {e}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(str(e).encode('utf-8'))
+            self._proxy_error(headers_sent, 500, str(e).encode('utf-8'))
+
+    def _proxy_error(self, headers_sent, status, body):
+        """Rapporterar ett proxyfel utan att skada ett redan påbörjat svar.
+
+        Två fällor som båda utlöses först när strömningen har börjat:
+        statusraden är redan skickad, så ett andra `send_response` skulle
+        injicera "HTTP/1.0 500 ..." mitt i SSE-kroppen och förvirra klientens
+        parser; och felet är ofta just att klienten gick sin väg
+        (BrokenPipeError/ConnectionResetError), så själva felskrivningen
+        kastar igen och eskalerar till en traceback ur handlern.
+        """
+        try:
+            if not headers_sent:
+                self.send_response(status)
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                # Kroppen är redan påbörjad. Det enda ärliga vi kan göra är
+                # att avsluta strömmen; klienten ser ett trunkerat svar.
+                self.close_connection = True
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def handle_tts(self):
         parsed_path = urllib.parse.urlparse(self.path)
