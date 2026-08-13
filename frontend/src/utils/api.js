@@ -82,6 +82,20 @@ function generatePayloadJSON(transcribedText, model, systemPrompt) {
   return JSON.stringify({ model: model || "gemma4-e2b", messages })
 }
 
+// Tolerates ``` fences and falls back to the raw reply when the model didn't
+// return the JSON envelope the prompt asked for.
+function parseTranslation(modelResponse) {
+  let cleanJson = modelResponse.trim()
+  if (cleanJson.startsWith("```json")) cleanJson = cleanJson.slice(7)
+  if (cleanJson.startsWith("```")) cleanJson = cleanJson.slice(3)
+  if (cleanJson.endsWith("```")) cleanJson = cleanJson.slice(0, -3)
+  try {
+    return JSON.parse(cleanJson.trim()).translation || ""
+  } catch (e) {
+    return modelResponse
+  }
+}
+
 // Chat-completions request. The system prompt asks for a bare translation
 // (no JSON wrapper) to keep prefill and output short, but we still tolerate
 // a legacy {"translation": ...} reply (``` fences included) and fall back to
@@ -124,30 +138,75 @@ export async function translateText(transcribedText, config) {
     modelResponse = JSON.stringify(data, null, 2)
   }
 
-  let translationVal = ""
-  try {
-    let cleanJson = modelResponse.trim()
-    if (cleanJson.startsWith("```json")) {
-      cleanJson = cleanJson.slice(7)
-    }
-    if (cleanJson.startsWith("```")) {
-      cleanJson = cleanJson.slice(3)
-    }
-    if (cleanJson.endsWith("```")) {
-      cleanJson = cleanJson.slice(0, -3)
-    }
-    cleanJson = cleanJson.trim()
-
-    const parsed = JSON.parse(cleanJson)
-    translationVal = parsed.translation || ""
-  } catch (e) {
-    translationVal = modelResponse
-  }
+  const translationVal = parseTranslation(modelResponse)
 
   return {
     translation: translationVal,
     duration: requestDuration,
     tokens: data.usage?.total_tokens || 0,
+  }
+}
+
+// Streaming chat-completions. Calls `onText(fullTextSoFar)` after every delta
+// so the caller can start speaking sentence one while the rest generates.
+export async function translateTextStreaming(transcribedText, config, onText) {
+  const { endpointUrl, useProxy, apiKey, modelName, systemPrompt } = config
+  const targetUrl = `${getNormalizedBaseUrl(endpointUrl)}/chat/completions`
+  const payload = JSON.parse(
+    generatePayloadJSON(transcribedText, modelName, systemPrompt),
+  )
+  payload.stream = true
+
+  const headers = { "Content-Type": "application/json" }
+  if (apiKey && apiKey.trim() !== "") {
+    headers["Authorization"] = `Bearer ${apiKey.trim()}`
+  }
+  const fetchUrl = useProxy
+    ? `/proxy?url=${encodeURIComponent(targetUrl)}`
+    : targetUrl
+
+  const startRequestTime = Date.now()
+  const response = await fetch(fetchUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(`API ${response.status}: ${errorText || response.statusText}`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let text = ""
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    // Keep the last, possibly incomplete, line in the buffer.
+    const lines = buffer.split("\n")
+    buffer = lines.pop()
+    for (const line of lines) {
+      if (!line.startsWith("data:")) continue
+      const data = line.slice(5).trim()
+      if (!data || data === "[DONE]") continue
+      try {
+        const delta = JSON.parse(data).choices?.[0]?.delta?.content
+        if (delta) {
+          text += delta
+          onText(text)
+        }
+      } catch (e) {
+        // A malformed line is not worth aborting the stream over.
+      }
+    }
+  }
+
+  return {
+    translation: parseTranslation(text),
+    duration: ((Date.now() - startRequestTime) / 1000).toFixed(2),
   }
 }
 

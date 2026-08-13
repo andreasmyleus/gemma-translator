@@ -34,5 +34,9 @@
   "en-long": {
     "lang": "en", "target": "sv", "target_s": 7.6,
     "text": "I would like to book a room for two nights, preferably with a view of the sea, and I also want to know whether breakfast is included in the price or costs extra."
+  },
+  "sv-multi": {
+    "lang": "sv", "target": "en", "target_s": 9.2,
+    "text": "Jag skulle behöva boka ett rum för två nätter. Kan du också berätta om frukosten ingår i priset? Jag undrar också var närmaste bankomaten ligger."
   }
 }

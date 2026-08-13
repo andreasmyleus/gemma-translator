@@ -217,14 +217,22 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             with urllib.request.urlopen(req, timeout=300) as response:
-                res_body = response.read()
                 self.send_response(response.status)
-                # Forward response headers
+                # Content-Length droppas: vi vet inte längden i förväg när vi
+                # strömmar, och HTTP/1.0-svar avslutas ändå av connection close.
                 for key, val in response.headers.items():
-                    if key.lower() not in ['content-length', 'connection']:
+                    if key.lower() not in ['content-length', 'connection', 'transfer-encoding']:
                         self.send_header(key, val)
                 self.end_headers()
-                self.wfile.write(res_body)
+                # Skriv vidare chunk för chunk i stället för att buffra hela
+                # svaret — annars kan klienten inte se en SSE-delta förrän
+                # genereringen är klar, och strömningen är meningslös.
+                while True:
+                    chunk = response.read(1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
         except urllib.error.HTTPError as e:
             print(f"[Proxy Error] HTTP Error {e.code}: {e.reason}")
             try:

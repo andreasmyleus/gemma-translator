@@ -19,6 +19,7 @@ from bench.wer import normalize, word_edit_distance
 METRICS = (
     "stt_ms",
     "llm_ms",
+    "llm_first_sentence_ms",
     "tts_first_ms",
     "tts_rest_ms",
     "time_to_first_audio_ms",

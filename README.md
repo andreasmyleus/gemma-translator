@@ -171,20 +171,46 @@ So a long system prompt is harmless on short utterances and brutal on long ones,
 
 Practical consequence: further shortening the prompt does not speed up requests that already sit below the cliff — it raises the utterance length at which you fall off it.
 
+### Streaming Gemma → TTS: helps only on multi-sentence translations
+
+The LLM response is streamed, and each sentence is synthesized and played as soon as it is complete, while the rest is still generating. The proxy in `backend/server.py` forwards chunk-by-chunk rather than buffering the whole response; `translateTextStreaming` reads the SSE deltas; `TranslatorApp` keeps a TTS queue whose `Audio` elements start fetching at enqueue time, so queued sentences download while the current one plays.
+
+**The benefit is confined to translations that run to more than one sentence.** With a single-sentence answer the first sentence *is* the whole response, so there is nothing to overlap and streaming saves exactly nothing. Measured as a paired A/B run (`bench/results/15-streaming.json`, 5 repeats, ABBA-interleaved):
+
+| Fixture | Time-to-first-audio B/A | Why |
+| :--- | ---: | :--- |
+| `sv-multi` (three sentences out) | **0.851** | audio starts 1290 ms before generation ends |
+| `sv-long` (internal sentence break) | 0.936 | 557 ms of overlap |
+| the other 8 (single sentence) | 0.969–1.019 | nothing to overlap; neutral |
+
+The suite-wide aggregate is 0.985 — a null. **Do not quote that figure without the qualification**: on its own it reads as "streaming does nothing", which is wrong in the other direction. Nine of the ten fixtures are structurally incapable of showing the effect because they translate to one sentence, so the aggregate describes the fixture set rather than the optimization.
+
+All three stage controls came in at 0.999 / 0.998 / 0.999 — the cleanest run of the campaign — and all ten translations were byte-identical across arms, so the null on single-sentence output is a real measurement rather than an effect lost in noise.
+
+**A trap for anyone adding another streaming measurement:** `requests.iter_lines(decode_unicode=True)` falls back to **ISO-8859-1** for a `text/*` response with no charset, and litert-lm's `text/event-stream` has none. That turns `är` into `Ã¤r` and, because mojibake is longer than the text it replaces, inflates the measured TTS time on non-ASCII output — it corrupts timings, not just strings. Set `response.encoding = "utf-8"` first; see `bench/runner._post_llm_streaming`. The browser was never affected, since `TextDecoder` defaults to UTF-8.
+
+### The fixture set is biased toward short utterances
+
+Every bench fixture is a short, single-utterance prompt: one to three sentences, 1.1–10.1s of audio, 17–171 characters of output. **Any optimization whose benefit scales with output length is systematically under-measured here.**
+
+That is not hypothetical — it has now happened three times. The GPU build (0.771 aggregate `llm_ms`, but 0.37 on the long fixtures), the shortened system prompt (same shape, same reason), and streaming (a null aggregate against 0.851 on the one multi-sentence fixture) all have their real effect concentrated in the fixtures the suite has fewest of.
+
+Read every aggregate in `bench/results/` with that in mind, and add longer-output fixtures before concluding that a length-scaling optimization is worthless.
+
 ### Ideas worth trying next (not implemented)
 
 Ordered by expected impact on perceived latency:
 
 1. **Whisper `cpu_threads`** — the untested half of the old "short padding + `cpu_threads`" idea. The short-padding half was measured and gave nothing (see above), so expectations here should be modest.
 2. **Shorten the system prompt further** — the JSON wrapper is already gone (see the context-cliff section above). Remaining headroom is bounded: below the cliff prompt length is free, so this buys a longer utterance before the 2.6× penalty hits, not a general speedup.
-3. **Stream Gemma → TTS** — synthesize/play the first sentence while the rest generates. Cuts perceived wait by 1–3s even if wall time is unchanged (needs LiteRT streaming + sentence buffering).
-4. **Prefetch TTS chunk N+1 while chunk N plays** — `playTTS` today fetches the next chunk only after `onended`.
-5. **Whisper decode flags** — `without_timestamps=True`, `condition_on_previous_text=False` alongside `cpu_threads` (~0.2s, stabler short clips).
-6. **Trim leading/trailing silence** before STT — shorter audio helps short-pad Whisper and sends less noise to Gemma.
-7. **Binary PCM upload** instead of base64 Float32 — tiny on 2–3s clips; more relevant on a Pi.
-8. **Lighter Piper voices** (`…-low` / `…-x_low`) — TTS is already ~0.1s; mainly a Pi memory/CPU win at some quality cost.
+3. **Whisper decode flags** — `without_timestamps=True`, `condition_on_previous_text=False` alongside `cpu_threads` (~0.2s, stabler short clips).
+4. **Trim leading/trailing silence** before STT — shorter audio helps short-pad Whisper and sends less noise to Gemma.
+5. **Binary PCM upload** instead of base64 Float32 — tiny on 2–3s clips; more relevant on a Pi.
+6. **Lighter Piper voices** (`…-low` / `…-x_low`) — TTS is already ~0.1s; mainly a Pi memory/CPU win at some quality cost.
 
-Suggested build order: (1)+(5) together, then (3) if it still feels slow.
+Streaming Gemma → TTS and TTS prefetching were both on this list and are now implemented — the TTS queue introduced with streaming supersedes the separate prefetch idea, since queued sentences already download while the current one plays.
+
+Suggested build order: (1)+(3) together.
 
 ## Raspberry Pi Appliance Deployment
 

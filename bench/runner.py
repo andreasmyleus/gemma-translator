@@ -21,6 +21,7 @@ proxyhoppet och låsen i server.py är latenskällor vi vill kunna se.
 """
 
 import base64
+import json
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -48,6 +49,7 @@ class RunResult:
     error: str = ""
     stt_ms: float = 0.0
     llm_ms: float = 0.0
+    llm_first_sentence_ms: float = 0.0
     tts_first_ms: float = 0.0
     tts_rest_ms: float = 0.0
     transcript: str = ""
@@ -57,7 +59,9 @@ class RunResult:
 
     @property
     def time_to_first_audio_ms(self):
-        return self.stt_ms + self.llm_ms + self.tts_first_ms
+        # Vid strömning börjar TTS på första meningen, inte på hela svaret.
+        llm_part = self.llm_first_sentence_ms or self.llm_ms
+        return self.stt_ms + llm_part + self.tts_first_ms
 
     @property
     def wall_total_ms(self):
@@ -90,6 +94,51 @@ def _post_llm(api_base, llm_url, model, text, src_lang, dst_lang, prompt_fn=syst
     return parse_translation(raw), elapsed_ms
 
 
+_SENTENCE_END = (".", "!", "?", "…")
+
+
+def _post_llm_streaming(api_base, llm_url, model, text, src_lang, dst_lang, prompt_fn=system_prompt):
+    """Som _post_llm men mäter också när första hela meningen är klar."""
+    prompt = prompt_fn(LANGUAGE_NAMES[src_lang], LANGUAGE_NAMES[dst_lang])
+    payload = build_llm_payload(text, model, prompt)
+    payload["stream"] = True
+    proxied = f"{api_base}/proxy?url={urllib.parse.quote(llm_url, safe='')}"
+
+    started = time.perf_counter()
+    first_sentence_ms = 0.0
+    accumulated = ""
+    with requests.post(proxied, json=payload, stream=True, timeout=REQUEST_TIMEOUT) as response:
+        response.raise_for_status()
+        # SSE-svaret är text/event-stream utan charset, och requests faller då
+        # tillbaka på ISO-8859-1 för text/*. Utan den här raden blir "är" till
+        # "Ã¤r" i varje icke-ASCII-översättning — vilket inte bara förstör
+        # texten utan också mäter fel: Piper får en längre sträng att uttala,
+        # så tts_first_ms blåses upp (uppmätt 1,38–1,87 på en→sv-fixturerna).
+        # Frontends TextDecoder defaultar till UTF-8 och har aldrig haft
+        # problemet, så det här är bench-specifikt.
+        response.encoding = "utf-8"
+        for line in response.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                delta = json.loads(data)["choices"][0].get("delta", {}).get("content")
+            except (ValueError, KeyError, IndexError):
+                continue
+            if not delta:
+                continue
+            accumulated += delta
+            if not first_sentence_ms and accumulated.rstrip().endswith(_SENTENCE_END):
+                first_sentence_ms = (time.perf_counter() - started) * 1000
+    total_ms = (time.perf_counter() - started) * 1000
+    if not first_sentence_ms:
+        # Svar utan skiljetecken: hela svaret är "första meningen".
+        first_sentence_ms = total_ms
+    return parse_translation(accumulated), total_ms, first_sentence_ms
+
+
 def _get_tts(api_base, text, language):
     started = time.perf_counter()
     response = requests.get(
@@ -102,7 +151,7 @@ def _get_tts(api_base, text, language):
     return elapsed_ms
 
 
-def run_fixture(api_base, llm_url, model, fixture_id, spec, prompt_fn=system_prompt):
+def run_fixture(api_base, llm_url, model, fixture_id, spec, prompt_fn=system_prompt, stream=False):
     result = RunResult(fixture_id=fixture_id)
     try:
         samples = load_pcm_16k(ensure_wav(fixture_id, spec))
@@ -117,15 +166,26 @@ def run_fixture(api_base, llm_url, model, fixture_id, spec, prompt_fn=system_pro
         if not result.transcript.strip():
             raise ValueError("STT gav tom transkription")
 
-        result.translation, result.llm_ms = _post_llm(
-            api_base,
-            llm_url,
-            model,
-            result.transcript,
-            spec["lang"],
-            spec["target"],
-            prompt_fn,
-        )
+        if stream:
+            result.translation, result.llm_ms, result.llm_first_sentence_ms = _post_llm_streaming(
+                api_base,
+                llm_url,
+                model,
+                result.transcript,
+                spec["lang"],
+                spec["target"],
+                prompt_fn,
+            )
+        else:
+            result.translation, result.llm_ms = _post_llm(
+                api_base,
+                llm_url,
+                model,
+                result.transcript,
+                spec["lang"],
+                spec["target"],
+                prompt_fn,
+            )
 
         chunks = split_text_into_speech_chunks(result.translation)
         result.chunk_count = len(chunks)
@@ -142,7 +202,7 @@ def run_fixture(api_base, llm_url, model, fixture_id, spec, prompt_fn=system_pro
     return result
 
 
-def warmup(api_base, llm_url, model, fixtures, prompt_fn=system_prompt):
+def warmup(api_base, llm_url, model, fixtures, prompt_fn=system_prompt, stream=False):
     """Kör en runda per språkpar utan att mäta.
 
     Första anropet per Piper-röst laddar modellen från disk, och första
@@ -156,6 +216,6 @@ def warmup(api_base, llm_url, model, fixtures, prompt_fn=system_prompt):
             continue
         seen.add(pair)
         print(f"[warmup] {fixture_id} ({spec['lang']}→{spec['target']})", flush=True)
-        result = run_fixture(api_base, llm_url, model, fixture_id, spec, prompt_fn)
+        result = run_fixture(api_base, llm_url, model, fixture_id, spec, prompt_fn, stream=stream)
         if not result.ok:
             raise RuntimeError(f"Uppvärmningen misslyckades för {fixture_id}: {result.error}")

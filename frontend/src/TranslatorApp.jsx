@@ -21,7 +21,7 @@ import Visualizer from "./components/Visualizer"
 import { useAudioRecorder } from "./hooks/useAudioRecorder"
 import {
   transcribeAudio,
-  translateText,
+  translateTextStreaming,
   splitTextIntoSpeechChunks,
 } from "./utils/api"
 import { playBlip } from "./utils/audio-blip"
@@ -83,71 +83,72 @@ function TranslatorApp({ config }) {
     }
   }, [micError])
 
+  // Sentences waiting to be spoken. Each entry is an already-constructed Audio
+  // element: creating it starts the fetch, so queued chunks download while the
+  // current one plays.
+  const ttsQueueRef = useRef({ pending: [], playing: false })
+
+  const markFirstAudio = useCallback(() => {
+    const marks = timingRef.current
+    if (!marks || marks.logged) return
+    marks.logged = true
+    const since = (mark) => `${(mark - marks.keyup) | 0}ms`
+    console.log(
+      `[latency] keyup→stt ${since(marks.stt)} | →llm ${since(marks.llm)} ` +
+        `| →first audio ${since(performance.now())}`,
+    )
+    setMetaText(
+      `STT ${since(marks.stt)} · LLM ${since(marks.llm)} · ljud ${since(performance.now())}`,
+    )
+  }, [])
+
   const stopSpeaking = useCallback(() => {
+    ttsQueueRef.current.pending = []
+    ttsQueueRef.current.playing = false
     if (onlineAudioPlayerRef.current) {
       onlineAudioPlayerRef.current.pause()
       onlineAudioPlayerRef.current = null
     }
   }, [])
 
-  // Speak text via /api/tts, splitting into ~180-char chunks and chaining
-  // playback so long translations don't overflow a single TTS request.
-  const playTTS = useCallback(
+  const pumpTTSQueue = useCallback(() => {
+    const queue = ttsQueueRef.current
+    if (queue.playing) return
+    const player = queue.pending.shift()
+    if (!player) return
+    queue.playing = true
+    onlineAudioPlayerRef.current = player
+    player.onplaying = markFirstAudio
+    player.onended = () => {
+      queue.playing = false
+      pumpTTSQueue()
+    }
+    player.onerror = () => {
+      queue.playing = false
+      stopSpeaking()
+      alert("TTS playback failed. Backend server may be offline.")
+    }
+    player.play().catch((e) => {
+      console.error("Audio play error:", e)
+      queue.playing = false
+      stopSpeaking()
+    })
+  }, [markFirstAudio, stopSpeaking])
+
+  // Queue text for playback. Safe to call repeatedly as sentences arrive.
+  const enqueueTTS = useCallback(
     (text, targetLang) => {
       if (!text) return
-      stopSpeaking()
-
-      const chunks = splitTextIntoSpeechChunks(text)
-      if (chunks.length === 0) return
-
-      // Bind this playback to the marks object that was current when it
-      // started. Re-reading timingRef.current inside onplaying would let a
-      // late-firing chunk from a previous utterance stamp `logged` on the
-      // *next* utterance's marks, silently suppressing its measurement.
-      const marks = timingRef.current
-
-      let chunkIndex = 0
-
-      const playNextChunk = () => {
-        if (chunkIndex >= chunks.length) {
-          stopSpeaking()
-          return
-        }
-        const ttsUrl = `/api/tts?text=${encodeURIComponent(chunks[chunkIndex])}&lang=${encodeURIComponent(targetLang)}`
-        const player = new Audio(ttsUrl)
+      for (const chunk of splitTextIntoSpeechChunks(text)) {
+        const url = `/api/tts?text=${encodeURIComponent(chunk)}&lang=${encodeURIComponent(targetLang)}`
+        const player = new Audio(url)
+        player.preload = "auto"
         player.volume = 1.0
-        onlineAudioPlayerRef.current = player
-
-        player.onplaying = () => {
-          if (!marks || marks.logged) return
-          marks.logged = true
-          const since = (mark) => `${(mark - marks.keyup) | 0}ms`
-          console.log(
-            `[latency] keyup→stt ${since(marks.stt)} | →llm ${since(marks.llm)} ` +
-              `| →first audio ${since(performance.now())}`,
-          )
-          setMetaText(
-            `STT ${since(marks.stt)} · LLM ${since(marks.llm)} · ljud ${since(performance.now())}`,
-          )
-        }
-
-        player.onended = () => {
-          chunkIndex++
-          playNextChunk()
-        }
-        player.onerror = () => {
-          stopSpeaking()
-          alert("TTS playback failed. Backend server may be offline.")
-        }
-        player.play().catch((e) => {
-          console.error("Audio play error:", e)
-          stopSpeaking()
-        })
+        ttsQueueRef.current.pending.push(player)
       }
-
-      playNextChunk()
+      pumpTTSQueue()
     },
-    [stopSpeaking],
+    [pumpTTSQueue],
   )
 
   // Rotate a lane's language, skipping the slot held by the other lane
@@ -246,21 +247,45 @@ function TranslatorApp({ config }) {
         return
       }
 
-      // 2. Translation
-      const result = await translateText(transcribedText, {
-        ...config,
-        modelName: config.modelName,
-        systemPrompt: `Translate the user's text from ${src.name.split(" ")[0]} into ${dst.name.split(" ")[0]}. Reply with the translation only — no explanations, no alternatives, no quotes, no preamble.`,
-      })
-      if (timingRef.current) timingRef.current.llm = performance.now()
-
-      setTranslationData((prev) => ({ ...prev, text: result.translation }))
-      // Tokens rapporteras inte av litert-lm (usage saknas i svaret), och
-      // latenssiffrorna sätts av playTTS när ljudet faktiskt börjar spela.
-
-      if (config.enableTts) {
-        playTTS(result.translation, dst.ttsLang)
+      // 2. Translation, streamed — speak each sentence as soon as it lands.
+      let spokenChars = 0
+      const speakCompleteSentences = (full, isFinal) => {
+        let upto = full.length
+        if (!isFinal) {
+          const lastEnd = Math.max(
+            full.lastIndexOf("."),
+            full.lastIndexOf("!"),
+            full.lastIndexOf("?"),
+            full.lastIndexOf("…"),
+          )
+          if (lastEnd < spokenChars) return
+          upto = lastEnd + 1
+        }
+        const ready = full.slice(spokenChars, upto).trim()
+        if (!ready) return
+        spokenChars = upto
+        if (config.enableTts) enqueueTTS(ready, dst.ttsLang)
       }
+
+      const result = await translateTextStreaming(
+        transcribedText,
+        {
+          ...config,
+          modelName: config.modelName,
+          systemPrompt: `Translate the user's text from ${src.name.split(" ")[0]} into ${dst.name.split(" ")[0]}. Reply with the translation only — no explanations, no alternatives, no quotes, no preamble.`,
+        },
+        (partial) => {
+          setTranslationData((prev) => ({ ...prev, text: partial }))
+          speakCompleteSentences(partial, false)
+        },
+      )
+
+      if (timingRef.current) timingRef.current.llm = performance.now()
+      setTranslationData((prev) => ({ ...prev, text: result.translation }))
+      speakCompleteSentences(result.translation, true)
+      // Tokens rapporteras inte av litert-lm (usage saknas i svaret), och
+      // latenssiffrorna sätts av markFirstAudio när ljudet faktiskt börjar
+      // spela.
     } catch (err) {
       console.error(err)
       setTranscriptionData((prev) => ({

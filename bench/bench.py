@@ -110,7 +110,7 @@ def load_result(label):
         return json.load(handle)
 
 
-def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None):
+def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None, stream_b=False):
     """Kör arm A (oförändrad miljö) och arm B (`ab_env` ovanpå) varvat, ABBA.
 
     Varvningen är poängen: ett par mätt inom sekunder av varandra delar
@@ -128,6 +128,14 @@ def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None):
     PROMPT_VARIANTS, t.ex. "plain"). Skild av samma skäl som `model_b`:
     prompten byggs i bench:s egen process av frontend_mirror.system_prompt,
     inte av backend-processens miljö, så `--ab` kan inte uttrycka det.
+
+    `stream_b` väljer om arm B strömmar LLM-svaret (`--ab-stream`). Skild av
+    samma skäl som `model_b`/`prompt_variant`: strömning är en runner-nivå-
+    ändring i vilken anropsfunktion `run_fixture` använder
+    (`_post_llm_streaming` mot `_post_llm`), inte något backend-processens
+    miljö kan uttrycka. Proxyändringen i handle_proxy är transparent för
+    icke-strömmande anrop, så arm A och arm B kan dela samma backend-kod —
+    bara vilken funktion bench:s egen process anropar skiljer dem åt.
     """
     api_base_a = f"http://localhost:{args.api_port}"
     api_base_b = f"http://localhost:{args.api_port + 1}"
@@ -142,8 +150,9 @@ def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None):
         # fortfarande CPU-modellen i uppvärmningen och arm B:s första mätta
         # repetition bär GPU-buildens ~7 s vikt-laddningskostnad i stället.
         # Samma resonemang gäller prompt_fn_b: värm med den prompt som
-        # faktiskt mäts, inte standardprompten.
-        warmup(api_base_b, llm_url, model_b, fixtures, prompt_fn=prompt_fn_b)
+        # faktiskt mäts, inte standardprompten. stream=stream_b av samma
+        # skäl: värm den kodväg som faktiskt mäts.
+        warmup(api_base_b, llm_url, model_b, fixtures, prompt_fn=prompt_fn_b, stream=stream_b)
 
         per_fixture_a, per_fixture_b, paired = {}, {}, {}
         for fixture_id, spec in fixtures.items():
@@ -156,7 +165,8 @@ def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None):
                     base = api_base_a if arm == "a" else api_base_b
                     model = args.model if arm == "a" else model_b
                     prompt_fn = system_prompt if arm == "a" else prompt_fn_b
-                    result = run_fixture(base, llm_url, model, fixture_id, spec, prompt_fn)
+                    stream = False if arm == "a" else stream_b
+                    result = run_fixture(base, llm_url, model, fixture_id, spec, prompt_fn, stream=stream)
                     (runs_a if arm == "a" else runs_b).append(result)
                     print(
                         f"[bench] {fixture_id} {attempt + 1}/{args.repeats} arm {arm.upper()}: "
@@ -189,6 +199,8 @@ def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None):
         "model_b": model_b,
         "prompt_a": "json",
         "prompt_b": prompt_variant or "json",
+        "stream_a": False,
+        "stream_b": stream_b,
         "arm_a": report_a,
         "arm_b": report_b,
         "paired": paired,
@@ -206,6 +218,8 @@ def run_ab(args, fixtures, ab_env, model_b, prompt_variant=None):
         ab_note["model"] = f"{args.model} -> {model_b}"
     if prompt_variant:
         ab_note["prompt"] = f"json -> {prompt_variant}"
+    if stream_b:
+        ab_note["stream"] = "off -> on"
     print(render_markdown_ab(args.label, paired, drift, ab_note))
     print()
 
@@ -259,6 +273,25 @@ def main():
             "med --compare, av samma skäl som de."
         ),
     )
+    parser.add_argument(
+        "--ab-stream",
+        action="store_true",
+        help=(
+            "Kör en parvis A/B-mätning där arm B strömmar LLM-svaret och mäter "
+            "tid-till-första-mening (arm A svarar icke-strömmande som idag). "
+            "Skild av samma skäl som --ab-model/--ab-prompt: strömning väljs "
+            "per anrop i run_fixture (vilken _post_llm-funktion som anropas), "
+            "inte av backend-processens miljö, så --ab kan inte uttrycka det. "
+            "Proxyändringen är transparent för icke-strömmande anrop, så arm A "
+            "och arm B kör samma backend-kod. Kan kombineras med --ab/--ab-model/"
+            "--ab-prompt men inte med --compare, av samma skäl som de."
+        ),
+    )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Mät den strömmande LLM-vägen i enarmsläget (utan --ab/--ab-model/--ab-prompt/--ab-stream)",
+    )
     parser.add_argument("--api-port", type=int, default=3100)
     parser.add_argument("--llm-port", type=int, default=9379)
     parser.add_argument("--model", default="gemma4-e2b")
@@ -282,6 +315,10 @@ def main():
         raise SystemExit(
             "--ab-prompt och --compare kan inte kombineras, av samma skäl som --ab."
         )
+    if args.ab_stream and args.compare:
+        raise SystemExit(
+            "--ab-stream och --compare kan inte kombineras, av samma skäl som --ab."
+        )
 
     fixtures = load_fixtures()
     if args.fixtures:
@@ -290,13 +327,14 @@ def main():
         if not fixtures:
             raise SystemExit(f"Inga fixturer matchade {args.fixtures!r}")
 
-    if args.ab or args.ab_model or args.ab_prompt:
+    if args.ab or args.ab_model or args.ab_prompt or args.ab_stream:
         return run_ab(
             args,
             fixtures,
             parse_env_overrides(args.ab),
             args.ab_model or args.model,
             args.ab_prompt,
+            args.ab_stream,
         )
 
     api_base = f"http://localhost:{args.api_port}"
@@ -306,13 +344,13 @@ def main():
 
     backend = start_backend(args.api_port)
     try:
-        warmup(api_base, llm_url, args.model, fixtures)
+        warmup(api_base, llm_url, args.model, fixtures, stream=args.stream)
 
         per_fixture = {}
         for fixture_id, spec in fixtures.items():
             runs = []
             for attempt in range(args.repeats):
-                result = run_fixture(api_base, llm_url, args.model, fixture_id, spec)
+                result = run_fixture(api_base, llm_url, args.model, fixture_id, spec, stream=args.stream)
                 marker = " (uppvärmning, kastas)" if attempt == 0 else ""
                 status = "ok" if result.ok else f"FEL {result.error}"
                 print(
