@@ -1887,6 +1887,15 @@ git commit -m "Set Whisper cpu_threads and per-utterance decode flags"
 
 ## Task 11: Optimering 4 — meningsvis TTS-chunkning
 
+> **STRUKEN efter mätning.** Bänkens upplösning mättes i Task 18 till ungefär
+> 3 %: två steg som en STT-ändring bevisligen inte kan påverka läste 0,985 och
+> 0,974 i stället för 1,000. Den här optimeringen träffar TTS respektive
+> klientsidan, som tillsammans utgör 5 % av tiden till första ljud. Även en
+> halvering där landar under bruskgolvet och kan alltså inte mätas med den här
+> riggen. Eftersom kampanjens hela premiss är att varje förbättring ska mätas,
+> byggs den inte. Den kan tas upp igen om bruskgolvet sänks.
+
+
 **Files:**
 - Modify: `frontend/src/utils/api.js:154-168` (`splitTextIntoSpeechChunks`)
 - Modify: `bench/frontend_mirror.py` (`split_text_into_speech_chunks`)
@@ -2125,6 +2134,15 @@ git commit -m "Ask Gemma for a bare translation instead of a JSON wrapper"
 
 ## Task 13: Optimering 6 — prefetcha nästa TTS-chunk
 
+> **STRUKEN efter mätning.** Bänkens upplösning mättes i Task 18 till ungefär
+> 3 %: två steg som en STT-ändring bevisligen inte kan påverka läste 0,985 och
+> 0,974 i stället för 1,000. Den här optimeringen träffar TTS respektive
+> klientsidan, som tillsammans utgör 5 % av tiden till första ljud. Även en
+> halvering där landar under bruskgolvet och kan alltså inte mätas med den här
+> riggen. Eftersom kampanjens hela premiss är att varje förbättring ska mätas,
+> byggs den inte. Den kan tas upp igen om bruskgolvet sänks.
+
+
 **Files:**
 - Modify: `frontend/src/TranslatorApp.jsx` (`playTTS`)
 
@@ -2230,6 +2248,15 @@ git commit -m "Prefetch the next TTS chunk while the current one plays"
 ---
 
 ## Task 14: Optimering 7 — klientsidans ljudväg
+
+> **STRUKEN efter mätning.** Bänkens upplösning mättes i Task 18 till ungefär
+> 3 %: två steg som en STT-ändring bevisligen inte kan påverka läste 0,985 och
+> 0,974 i stället för 1,000. Den här optimeringen träffar TTS respektive
+> klientsidan, som tillsammans utgör 5 % av tiden till första ljud. Även en
+> halvering där landar under bruskgolvet och kan alltså inte mätas med den här
+> riggen. Eftersom kampanjens hela premiss är att varje förbättring ska mätas,
+> byggs den inte. Den kan tas upp igen om bruskgolvet sänks.
+
 
 **Files:**
 - Modify: `frontend/src/hooks/useAudioRecorder.js` (`startRecording`, `finalizeRecording`, `samplesToPayload`)
