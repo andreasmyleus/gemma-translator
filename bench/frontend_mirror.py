@@ -23,6 +23,8 @@ Speglar:
   frontend/src/utils/api.js       generatePayloadJSON
   frontend/src/utils/api.js       parseTranslation
   frontend/src/utils/api.js       envelope-vakten i translateTextStreaming
+  frontend/src/utils/api.js       isBackchannel / endsWithContinuationCue /
+                                  isRepairUtterance / stripRepairCue
   frontend/src/TranslatorApp.jsx  systemprompten i processTranslation
   frontend/src/TranslatorApp.jsx  speakCompleteSentences
 
@@ -35,13 +37,94 @@ import re
 SPEECH_CHUNK_LIMIT = 180
 
 
+def is_speakable(text):
+    """True när texten innehåller minst en bokstav. Port av isSpeakable."""
+    return bool(re.search(r"[^\W\d_]", text or "", re.UNICODE))
+
+
+CONTINUE_WINDOW_MS = 1500
+REPAIR_WINDOW_MS = 4000
+CONTINUATION_HOLD_MS = 1400
+
+_BACKCHANNEL_RE = re.compile(
+    r"^(m+h?m+|uh+|u+m+|öh+|äh+|eh+|euh+|hmm+|huh+|tsk+)$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def is_backchannel(text):
+    """Port av isBackchannel — korta fyllnadsljud, inte svar som 'ja'/'yes'."""
+    stripped = re.sub(r"[.,!?…]+$", "", (text or "").strip())
+    return bool(stripped) and bool(_BACKCHANNEL_RE.match(stripped))
+
+
+CONTINUATION_CUES = frozenset(
+    {
+        "och",
+        "and",
+        "men",
+        "but",
+        "or",
+        "eller",
+        "så",
+        "so",
+        "sen",
+        "then",
+        "att",
+        "that",
+        "för",
+        "because",
+        "y",
+        "et",
+        "mais",
+        "que",
+        "porque",
+        "um",
+        "uh",
+        "öh",
+        "eh",
+        "euh",
+    }
+)
+
+
+def ends_with_continuation_cue(text):
+    """Port av endsWithContinuationCue."""
+    words = re.sub(r"[,:]+$", "", (text or "").strip()).split()
+    if not words:
+        return False
+    last = re.sub(r"[.,!?…]+$", "", words[-1].lower())
+    return last in CONTINUATION_CUES
+
+
+_REPAIR_CUE_RE = re.compile(
+    r"^(nej|no|non|wait|alltså|sorry|jag menade|i mean|en fait|o sea)\b[,.!?]*\s*",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def is_repair_utterance(text):
+    """Port av isRepairUtterance."""
+    return bool(_REPAIR_CUE_RE.match((text or "").strip()))
+
+
+def strip_repair_cue(text):
+    """Port av stripRepairCue. Kort rest (t.ex. bara 'Nej') lämnas orörd."""
+    stripped = (text or "").strip()
+    rest = _REPAIR_CUE_RE.sub("", stripped, count=1).strip()
+    return stripped if len(rest) < 3 else rest
+
+
 def split_text_into_speech_chunks(text, limit=SPEECH_CHUNK_LIMIT):
     """Ordsäker chunkning så varje /api/tts-anrop håller sig under `limit`.
 
     Port av splitTextIntoSpeechChunks. JS delar på /\\s+/ och trimmar, vilket
     innebär att tom sträng ger noll chunkar och att ett enskilt ord längre än
-    gränsen släpps igenom helt. Båda beteendena bevaras medvetet.
+    gränsen släpps igenom helt. Punctuation-only (t.ex. ".") ger noll chunkar
+    — Piper vägrar syntetisera dem.
     """
+    if not is_speakable(text):
+        return []
     words = re.split(r"\s+", text)
     chunks = []
     current = ""
@@ -54,7 +137,7 @@ def split_text_into_speech_chunks(text, limit=SPEECH_CHUNK_LIMIT):
             current = word
     if current:
         chunks.append(current)
-    return chunks
+    return [c for c in chunks if is_speakable(c)]
 
 
 def system_prompt(src_name, dst_name):

@@ -203,10 +203,10 @@ export default function SettingsOverlay({
             onChange={(e) => handleChange("keyboardMode", e.target.value)}
           >
             <option value="landscape">
-              Landscape — active person (Enter / Space / ← →)
+              Landscape — active person (Enter / speak / ← →)
             </option>
             <option value="vertical">
-              Vertical — two-hand (Z / X / ← → / − +)
+              Vertical — Enter + per-lane language keys
             </option>
           </select>
           <div className="keyboard-help">
@@ -214,15 +214,13 @@ export default function SettingsOverlay({
               <>
                 <p>
                   <strong>Landscape</strong> — one active person (corner
-                  brackets). No on-screen record button; keys only.
+                  brackets). Speak to talk; no Spacebar.
                 </p>
                 <ul>
                   <li>
                     <kbd>Enter</kbd> switch active person
                   </li>
-                  <li>
-                    <kbd>Space</kbd> hold to talk, release to translate
-                  </li>
+                  <li>Speak — mic detects speech, silence ends the turn</li>
                   <li>
                     <kbd>←</kbd> <kbd>→</kbd> change active language
                   </li>
@@ -231,16 +229,14 @@ export default function SettingsOverlay({
             ) : (
               <>
                 <p>
-                  <strong>Vertical</strong> — each person has their own keys.
-                  No active-person highlight.
+                  <strong>Vertical</strong> — same speech detection; Enter
+                  switches person; language keys are per lane.
                 </p>
                 <ul>
                   <li>
-                    <kbd>Z</kbd> person 1 talk (hold / release)
+                    <kbd>Enter</kbd> switch active person
                   </li>
-                  <li>
-                    <kbd>X</kbd> person 2 talk (hold / release)
-                  </li>
+                  <li>Speak — mic detects speech for the active person</li>
                   <li>
                     <kbd>←</kbd> <kbd>→</kbd> person 1 language
                   </li>
@@ -252,7 +248,9 @@ export default function SettingsOverlay({
             )}
             <p className="keyboard-help-note">
               Click the page first. Keys are ignored while a settings field is
-              focused, and language changes are locked while recording.
+              focused. The mic is muted while TTS plays. Language changes are
+              locked while capturing. Extra speech during transcription is
+              captured as a new turn; TTS echo is filtered from the mic.
             </p>
           </div>
         </div>

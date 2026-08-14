@@ -51,14 +51,23 @@ export async function testConnectionAPI(endpointUrl, useProxy, apiKey) {
 }
 
 // POST base64 Float32 PCM (16 kHz mono) to the local Whisper STT.
-export async function transcribeAudio(base64Data, sourceLangCode) {
+// Returns { text, language }. `language` is the resolved source code (lane
+// prior, unless auto-detect is confident the other lane was spoken).
+export async function transcribeAudio(
+  base64Data,
+  sourceLangCode,
+  { otherLanguage, autoLanguage = true, signal } = {},
+) {
   const response = await fetch("/api/stt", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       audio_base64: base64Data,
       language: sourceLangCode,
+      other_language: otherLanguage || undefined,
+      auto_language: !!autoLanguage,
     }),
+    signal,
   })
 
   if (!response.ok) {
@@ -66,7 +75,10 @@ export async function transcribeAudio(base64Data, sourceLangCode) {
   }
 
   const sttData = await response.json()
-  return sttData.text || ""
+  return {
+    text: sttData.text || "",
+    language: sttData.language || sourceLangCode,
+  }
 }
 
 function generatePayloadJSON(transcribedText, model, systemPrompt) {
@@ -236,8 +248,86 @@ export async function translateTextStreaming(
   }
 }
 
+// True when `text` contains at least one letter. Punctuation-only strings
+// ("." "…" "?") are Whisper/Gemma artefacts, not speech — Piper also refuses
+// them (empty chunk list → 500).
+export function isSpeakable(text) {
+  return /\p{L}/u.test(text || "")
+}
+
+// Same speaker resumes within this window → glue onto the open turn.
+export const CONTINUE_WINDOW_MS = 1500
+// After that, still fold in "nej, jag menade…" as a repair of the last row.
+export const REPAIR_WINDOW_MS = 4000
+// Extra VAD silence after a trailing conjunction ("och", "and", …).
+export const CONTINUATION_HOLD_MS = 1400
+
+const BACKCHANNEL_RE =
+  /^(m+h?m+|uh+|u+m+|öh+|äh+|eh+|euh+|hmm+|huh+|tsk+)$/iu
+
+export function isBackchannel(text) {
+  const t = (text || "").trim().replace(/[.,!?…]+$/g, "")
+  return t.length > 0 && BACKCHANNEL_RE.test(t)
+}
+
+const CONTINUATION_CUES = new Set([
+  "och",
+  "and",
+  "men",
+  "but",
+  "or",
+  "eller",
+  "så",
+  "so",
+  "sen",
+  "then",
+  "att",
+  "that",
+  "för",
+  "because",
+  "y",
+  "et",
+  "mais",
+  "que",
+  "porque",
+  "um",
+  "uh",
+  "öh",
+  "eh",
+  "euh",
+])
+
+export function endsWithContinuationCue(text) {
+  const words = (text || "")
+    .trim()
+    .replace(/[,:]+$/g, "")
+    .split(/\s+/)
+    .filter(Boolean)
+  if (words.length === 0) return false
+  const last = words[words.length - 1].toLowerCase().replace(/[.,!?…]+$/g, "")
+  return CONTINUATION_CUES.has(last)
+}
+
+const REPAIR_CUE_RE =
+  /^(nej|no|non|wait|alltså|sorry|jag menade|i mean|en fait|o sea)\b[,.!?]*\s*/iu
+
+export function isRepairUtterance(text) {
+  return REPAIR_CUE_RE.test((text || "").trim())
+}
+
+export function stripRepairCue(text) {
+  const t = (text || "").trim()
+  const rest = t.replace(REPAIR_CUE_RE, "").trim()
+  return rest.length < 3 ? t : rest
+}
+
+export function langByCode(languages, code) {
+  return languages.find((l) => l.code === code) || null
+}
+
 // Word-safe chunking so each /api/tts request stays under ~`limit` chars.
 export function splitTextIntoSpeechChunks(text, limit = 180) {
+  if (!isSpeakable(text)) return []
   const words = text.split(/\s+/)
   const chunks = []
   let currentChunk = ""
@@ -250,6 +340,6 @@ export function splitTextIntoSpeechChunks(text, limit = 180) {
     }
   }
   if (currentChunk) chunks.push(currentChunk)
-  return chunks
+  return chunks.filter(isSpeakable)
 }
 

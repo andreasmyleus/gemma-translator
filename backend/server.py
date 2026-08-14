@@ -118,6 +118,11 @@ def synthesize(text, language, syn_config=None):
     # syn_config=None is what PiperVoice.synthesize already defaults to, so the
     # product path stays byte-identical to before this parameter existed.
     chunks = list(get_piper_voice(language).synthesize(text, syn_config))
+    if not chunks:
+        # Piper returns nothing for punctuation-only strings (e.g. "."). A
+        # 500 here used to pop an alert in the kiosk. Silence is the right
+        # answer: there is nothing to speak.
+        return np.zeros(1, dtype=np.float32), 22050
     pcm = b"".join(c.audio_int16_bytes for c in chunks)
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0, chunks[0].sample_rate
 
@@ -139,19 +144,62 @@ def get_whisper_model(model_id=None):
         )
         return _whisper_models[model_id]
 
-def transcribe(audio_np, language):
-    """Transcribe 16 kHz mono float32 samples. Unknown languages are auto-detected."""
-    model_id = stt_model_for(language) if language in SUPPORTED_STT_LANGS else DEFAULT_STT_MODEL
-    segments, _ = get_whisper_model(model_id).transcribe(
+def transcribe(audio_np, language, other_language=None, auto_language=False):
+    """Transcribe 16 kHz mono float32 samples.
+
+    Returns (text, resolved_language). Unknown languages are auto-detected.
+    `auto_language` (product default) runs a cheap language-id pass on the
+    multilingual checkpoint and, if it is confident the *other* lane was
+    spoken, re-routes STT to that language. Bench leaves this off so fixture
+    language stays locked.
+    """
+    expected = language if language in SUPPORTED_STT_LANGS else None
+    other = other_language if other_language in SUPPORTED_STT_LANGS else None
+    resolved = expected
+    if auto_language and expected is not None and len(audio_np) >= int(16000 * 0.6):
+        try:
+            detector = get_whisper_model(DEFAULT_STT_MODEL)
+            detected, prob, _ = detector.detect_language(audio_np)
+            resolved = resolve_spoken_language(detected, prob, expected, other)
+        except Exception as e:
+            print(f"[STT] language detect failed, using {expected}: {e}", flush=True)
+            resolved = expected
+
+    model_id = stt_model_for(resolved) if resolved in SUPPORTED_STT_LANGS else DEFAULT_STT_MODEL
+    segments, info = get_whisper_model(model_id).transcribe(
         audio_np,
-        language=language if language in SUPPORTED_STT_LANGS else None,
+        language=resolved if resolved in SUPPORTED_STT_LANGS else None,
         beam_size=1,
         # Klipper bort tystnad före dekodning. Kortar ljudet som når modellen
         # och tar bort de hallucinationer stock-Whisper gärna producerar på
         # tysta partier.
         vad_filter=STT_VAD,
     )
-    return " ".join(s.text.strip() for s in segments)
+    text = " ".join(s.text.strip() for s in segments)
+    out_lang = resolved or getattr(info, "language", None) or expected or "en"
+    return text, out_lang
+
+
+def resolve_spoken_language(detected, probability, expected, other=None):
+    """Lane language is the prior; a confident other-lane (or supported) id wins.
+
+    Port-adjacent to the product STT auto-language rule. Short/uncertain clips
+    keep `expected` so Swedish-on-KB-Whisper is not flipped by a noisy detect.
+    """
+    code = (detected or "").split("-")[0].lower()
+    try:
+        prob = float(probability)
+    except (TypeError, ValueError):
+        prob = 0.0
+    if code not in SUPPORTED_STT_LANGS:
+        return expected
+    if expected and code == expected:
+        return expected
+    if other and code == other and prob >= 0.5:
+        return other
+    if expected and prob < 0.6:
+        return expected
+    return code
 
 
 # Överskrivbar så att bench/ kan köra en egen instans parallellt med en
@@ -330,6 +378,8 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("Missing audio_base64 parameter")
 
             language = data.get('language', 'en')
+            other_language = data.get('other_language')
+            auto_language = bool(data.get('auto_language', False))
             raw_data = base64.b64decode(audio_b64)
 
             # The browser sends a raw Float32Array buffer (16 kHz mono).
@@ -338,18 +388,26 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             peak = float(np.max(np.abs(audio_np))) if len(audio_np) else 0.0
             rms = float(np.sqrt(np.mean(audio_np ** 2))) if len(audio_np) else 0.0
             print(
-                f"[STT] audio: {duration_s:.2f}s, peak={peak:.4f}, rms={rms:.4f}, lang={language}",
+                f"[STT] audio: {duration_s:.2f}s, peak={peak:.4f}, rms={rms:.4f}, "
+                f"lang={language} auto={auto_language}",
                 flush=True,
             )
 
             with _stt_lock:
-                text = transcribe(audio_np, language)
-            print(f"[STT] Transcribed: {text!r}", flush=True)
+                text, resolved = transcribe(
+                    audio_np,
+                    language,
+                    other_language=other_language,
+                    auto_language=auto_language,
+                )
+            print(f"[STT] Transcribed: {text!r} (lang={resolved})", flush=True)
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({"text": text}).encode('utf-8'))
+            self.wfile.write(
+                json.dumps({"text": text, "language": resolved}).encode("utf-8")
+            )
         except Exception as e:
             traceback.print_exc()
             print(f"[STT Error] Exception: {e}")

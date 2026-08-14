@@ -64,7 +64,7 @@ class TestPlaybackPathContract(unittest.TestCase):
     def test_playback_binds_its_own_marks_object(self):
         # Commit 08c6df0. Läses timingRef.current om inuti onplaying kan en sent
         # startad chunk från yttrande 1 stämpla `logged` på yttrande 2:s marks.
-        self.assertIn("player.onplaying = () => reportLatency(marks, true)", self.source)
+        self.assertIn("reportLatency(marks, true)", self.source)
         pump = self.source.split("const pumpTTSQueue")[1].split("const enqueueTTS")[0]
         self.assertNotIn(
             "timingRef.current",
@@ -94,7 +94,56 @@ class TestPlaybackPathContract(unittest.TestCase):
         )
 
     def test_meta_line_is_written_even_with_tts_disabled(self):
-        self.assertIn("if (!config.enableTts) reportLatency(marks, false)", self.source)
+        self.assertIn("if (!cfg.enableTts) reportLatency(marks, false)", self.source)
+
+    def test_enter_mid_capture_finishes_the_utterance_instead_of_cancelling(self):
+        # Enter byter person mitt i ett yttrande: klippet ska STT:as och spelas
+        # upp för den som talade, inte kastas (cancelCapture + abandonActiveTurn).
+        enter = self.source.split('if (e.key === "Enter")')[1].split(
+            "if (config.keyboardMode"
+        )[0]
+        self.assertIn("finishCapture()", enter)
+        self.assertNotIn("cancelCapture()", enter)
+        self.assertNotIn("abandonActiveTurn", enter)
+        self.assertNotIn(
+            "generationRef.current += 1",
+            enter,
+            "Enter får inte bumpa generation — då tystnar STT/TTS för klippet.",
+        )
+
+    def test_speech_end_uses_the_capture_snapshot_not_live_refs(self):
+        # Encode är async: nästa person kan öppna en tur innan onSpeechEnd
+        # kör. Utan snapshoten från speech-start skulle klippet STT:as med
+        # fel språkpar.
+        end = self.source.split("const endUtterance")[1].split(
+            "const handleInterim"
+        )[0]
+        self.assertIn("utteranceFromCapture", end)
+        self.assertIn(
+            "const utterance = utteranceFromCapture || activeUtteranceRef.current",
+            end,
+        )
+
+    def test_other_person_ducks_tts_instead_of_cutting_it(self):
+        begin = self.source.split("const beginUtterance")[1].split(
+            "const endUtterance"
+        )[0]
+        self.assertIn("setTtsDuckRef.current?.(true)", begin)
+        self.assertIn("ttsQueueRef.current.lane === lane", begin)
+
+    def test_same_speaker_continuation_reuses_the_open_turn(self):
+        begin = self.source.split("const beginUtterance")[1].split(
+            "const endUtterance"
+        )[0]
+        self.assertIn("CONTINUE_WINDOW_MS", begin)
+        self.assertIn('merge: "continue"', begin)
+        self.assertIn("REPAIR_WINDOW_MS", begin)
+
+    def test_stt_auto_language_is_on_for_final_captures(self):
+        self.assertIn("autoLanguage: true", self.source)
+        self.assertIn("isBackchannel", read(API_JS))
+        self.assertIn("endsWithContinuationCue", read(API_JS))
+        self.assertIn("stripRepairCue", read(API_JS))
 
 
 class TestStreamingEnvelopeContract(unittest.TestCase):

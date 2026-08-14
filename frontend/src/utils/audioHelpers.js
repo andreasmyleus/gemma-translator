@@ -60,3 +60,25 @@ export function blobToBase64(blob) {
     reader.readAsDataURL(blob)
   })
 }
+
+export function concatSamples(a, b) {
+  if (!a || !a.length) return b
+  if (!b || !b.length) return a
+  const out = new Float32Array(a.length + b.length)
+  out.set(a, 0)
+  out.set(b, a.length)
+  return out
+}
+
+export async function samplesToBase64Pcm(samples) {
+  const rawBlob = new Blob(
+    [
+      samples.buffer.slice(
+        samples.byteOffset,
+        samples.byteOffset + samples.byteLength,
+      ),
+    ],
+    { type: "application/octet-stream" },
+  )
+  return blobToBase64(rawBlob)
+}

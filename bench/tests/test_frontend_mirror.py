@@ -16,10 +16,14 @@ import unittest
 
 from bench.frontend_mirror import (
     build_llm_payload,
+    ends_with_continuation_cue,
     first_sentence_end,
+    is_backchannel,
+    is_repair_utterance,
     looks_like_json_envelope,
     parse_translation,
     split_text_into_speech_chunks,
+    strip_repair_cue,
     system_prompt,
     system_prompt_json,
 )
@@ -34,6 +38,11 @@ class TestSplitTextIntoSpeechChunks(unittest.TestCase):
 
     def test_empty_text_yields_no_chunks(self):
         self.assertEqual(split_text_into_speech_chunks(""), [])
+
+    def test_punctuation_only_yields_no_chunks(self):
+        self.assertEqual(split_text_into_speech_chunks("."), [])
+        self.assertEqual(split_text_into_speech_chunks("..."), [])
+        self.assertEqual(split_text_into_speech_chunks("?!"), [])
 
     def test_splits_on_word_boundary_under_limit(self):
         text = " ".join(["ord"] * 10)  # 10 * 4 - 1 = 39 tecken
@@ -53,6 +62,33 @@ class TestSplitTextIntoSpeechChunks(unittest.TestCase):
             split_text_into_speech_chunks("ett   två\n\ttre"),
             ["ett två tre"],
         )
+
+
+class TestConversationHelpers(unittest.TestCase):
+    def test_backchannel_is_filler_not_an_answer(self):
+        self.assertTrue(is_backchannel("mm"))
+        self.assertTrue(is_backchannel("Mhm."))
+        self.assertTrue(is_backchannel("uh"))
+        self.assertTrue(is_backchannel("öh"))
+        self.assertFalse(is_backchannel("ja"))
+        self.assertFalse(is_backchannel("yes"))
+        self.assertFalse(is_backchannel("Var ligger stationen?"))
+
+    def test_trailing_conjunction_holds_the_turn(self):
+        self.assertTrue(ends_with_continuation_cue("Jag vill ha kaffe och"))
+        self.assertTrue(ends_with_continuation_cue("I need that"))
+        self.assertFalse(ends_with_continuation_cue("Var ligger stationen?"))
+        self.assertFalse(ends_with_continuation_cue("ja"))
+
+    def test_repair_cue_strips_the_preamble(self):
+        self.assertTrue(is_repair_utterance("Nej, var ligger toaletten?"))
+        self.assertTrue(is_repair_utterance("I mean the station"))
+        self.assertFalse(is_repair_utterance("Var ligger stationen?"))
+        self.assertEqual(
+            strip_repair_cue("Nej, var ligger toaletten?"),
+            "var ligger toaletten?",
+        )
+        self.assertEqual(strip_repair_cue("Nej"), "Nej")
 
 
 class TestSystemPrompt(unittest.TestCase):
