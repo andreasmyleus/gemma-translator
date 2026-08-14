@@ -145,6 +145,11 @@ class TestPlaybackPathContract(unittest.TestCase):
         self.assertIn("endsWithContinuationCue", read(API_JS))
         self.assertIn("stripRepairCue", read(API_JS))
 
+    def test_whisper_nospeech_tokens_are_stripped_before_translate(self):
+        self.assertIn("normalizeSttText", read(API_JS))
+        self.assertIn("normalizeSttText(stt.text", self.source)
+        self.assertIn("dropTurn(turnId)", self.source)
+
 
 class TestStreamingEnvelopeContract(unittest.TestCase):
     def test_partials_are_suppressed_for_a_legacy_json_envelope(self):

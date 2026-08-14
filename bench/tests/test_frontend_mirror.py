@@ -20,7 +20,9 @@ from bench.frontend_mirror import (
     first_sentence_end,
     is_backchannel,
     is_repair_utterance,
+    is_speakable,
     looks_like_json_envelope,
+    normalize_stt_text,
     parse_translation,
     split_text_into_speech_chunks,
     strip_repair_cue,
@@ -89,6 +91,15 @@ class TestConversationHelpers(unittest.TestCase):
             "var ligger toaletten?",
         )
         self.assertEqual(strip_repair_cue("Nej"), "Nej")
+
+    def test_whisper_nospeech_tokens_are_stripped(self):
+        self.assertEqual(normalize_stt_text("<|nospeech|> ."), ".")
+        self.assertEqual(normalize_stt_text("<|nospeech|>"), "")
+        self.assertFalse(is_speakable(normalize_stt_text("<|nospeech|> .")))
+        self.assertEqual(
+            normalize_stt_text("Hej <|nospeech|> där"),
+            "Hej där",
+        )
 
 
 class TestSystemPrompt(unittest.TestCase):

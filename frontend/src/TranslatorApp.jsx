@@ -28,6 +28,7 @@ import {
   endsWithContinuationCue,
   isRepairUtterance,
   stripRepairCue,
+  normalizeSttText,
   langByCode,
   CONTINUE_WINDOW_MS,
   REPAIR_WINDOW_MS,
@@ -333,36 +334,38 @@ function TranslatorApp({ config, clearConversationRef }) {
     [lang1Index, lang2Index, activeLaneRecording],
   )
 
-  // Mark a turn cancelled if it is still waiting on STT/LLM — used when a
-  // newer recording supersedes it, or when processTranslation early-returns
-  // after !isCurrent() so the row never stays on "listening"/"translating".
-  const cancelTurnIfPending = useCallback(
-    (id) => {
-      if (id == null) return
-      setTurns((prev) =>
-        prev.map((t) =>
-          t.id === id &&
-          (t.status === "transcribing" || t.status === "translating")
-            ? { ...t, status: "cancelled", error: null }
-            : t,
-        ),
-      )
-    },
-    [],
-  )
+  // Mark a turn cancelled if it is still waiting on STT/LLM. Empty VAD
+  // false-starts are removed instead of leaving a dash in the transcript.
+  const cancelTurnIfPending = useCallback((id) => {
+    if (id == null) return
+    setTurns((prev) =>
+      prev.flatMap((t) => {
+        if (t.id !== id) return [t]
+        if (t.status !== "transcribing" && t.status !== "translating") return [t]
+        if (!isSpeakable(t.sourceText) && !isSpeakable(t.targetText)) return []
+        return [{ ...t, status: "cancelled", error: null }]
+      }),
+    )
+  }, [])
 
   // Drop a turn that never left listening/transcribing (empty capture, clear
   // during getUserMedia, superseded before processTranslation starts).
+  const dropTurn = useCallback((turnId) => {
+    if (turnId == null) return
+    setTurns((prev) => prev.filter((t) => t.id !== turnId))
+    if (activeTurnIdRef.current === turnId) activeTurnIdRef.current = null
+    if (activeUtteranceRef.current?.turnId === turnId) {
+      activeUtteranceRef.current = null
+    }
+    if (openTurnRef.current?.turnId === turnId) openTurnRef.current = null
+  }, [])
+
   const abandonActiveTurn = useCallback(
     (turnId) => {
-      cancelTurnIfPending(turnId)
+      dropTurn(turnId)
       setActiveLaneRecording(null)
-      if (activeTurnIdRef.current === turnId) activeTurnIdRef.current = null
-      if (activeUtteranceRef.current?.turnId === turnId) {
-        activeUtteranceRef.current = null
-      }
     },
-    [cancelTurnIfPending],
+    [dropTurn],
   )
 
   // Re-arm is a no-op for the happy path now (mic stays armed through STT/LLM),
@@ -585,7 +588,7 @@ function TranslatorApp({ config, clearConversationRef }) {
       })
         .then((stt) => {
           if (ac.signal.aborted) return
-          const text = (stt.text || "").trim()
+          const text = normalizeSttText(stt.text || "")
           if (!text || isBackchannel(text) || !isSpeakable(text)) return
           updateTurn(utterance.turnId, { sourceText: text })
         })
@@ -735,7 +738,7 @@ function TranslatorApp({ config, clearConversationRef }) {
       let transcribedText
       let sttLanguage = src.code
       if (extra.knownText) {
-        transcribedText = extra.knownText.trim()
+        transcribedText = normalizeSttText(extra.knownText)
         if (marks) marks.stt = performance.now()
       } else {
         sttInflightRef.current += 1
@@ -746,7 +749,7 @@ function TranslatorApp({ config, clearConversationRef }) {
           signal: controller.signal,
         })
         sttInflightRef.current = Math.max(0, sttInflightRef.current - 1)
-        transcribedText = (stt.text || "").trim()
+        transcribedText = normalizeSttText(stt.text || "")
         sttLanguage = stt.language || src.code
       }
       if (!isCurrent()) {
@@ -765,10 +768,7 @@ function TranslatorApp({ config, clearConversationRef }) {
             return
           }
         }
-        updateTurn(turnId, {
-          sourceText: transcribedText || "",
-          status: "empty",
-        })
+        dropTurn(turnId)
         return
       }
 

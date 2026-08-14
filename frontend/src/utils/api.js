@@ -255,6 +255,16 @@ export function isSpeakable(text) {
   return /\p{L}/u.test(text || "")
 }
 
+// Whisper sometimes emits special tokens (`<|nospeech|>`) plus a leftover
+// period. Those contain letters so isSpeakable would let them through to
+// Gemma/TTS unless they are stripped first.
+export function normalizeSttText(text) {
+  return (text || "")
+    .replace(/<\|[^|]*\|>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 // Same speaker resumes within this window → glue onto the open turn.
 export const CONTINUE_WINDOW_MS = 1500
 // After that, still fold in "nej, jag menade…" as a repair of the last row.

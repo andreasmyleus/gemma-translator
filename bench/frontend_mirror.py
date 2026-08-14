@@ -24,7 +24,8 @@ Speglar:
   frontend/src/utils/api.js       parseTranslation
   frontend/src/utils/api.js       envelope-vakten i translateTextStreaming
   frontend/src/utils/api.js       isBackchannel / endsWithContinuationCue /
-                                  isRepairUtterance / stripRepairCue
+                                  isRepairUtterance / stripRepairCue /
+                                  normalizeSttText
   frontend/src/TranslatorApp.jsx  systemprompten i processTranslation
   frontend/src/TranslatorApp.jsx  speakCompleteSentences
 
@@ -40,6 +41,15 @@ SPEECH_CHUNK_LIMIT = 180
 def is_speakable(text):
     """True när texten innehåller minst en bokstav. Port av isSpeakable."""
     return bool(re.search(r"[^\W\d_]", text or "", re.UNICODE))
+
+
+_WHISPER_TOKEN_RE = re.compile(r"<\|[^|]*\|>")
+
+
+def normalize_stt_text(text):
+    """Port av normalizeSttText. Tar bort Whisper-specialtokens som <|nospeech|>."""
+    cleaned = _WHISPER_TOKEN_RE.sub(" ", text or "")
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 CONTINUE_WINDOW_MS = 1500
