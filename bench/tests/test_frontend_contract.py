@@ -150,6 +150,46 @@ class TestPlaybackPathContract(unittest.TestCase):
         self.assertIn("normalizeSttText(stt.text", self.source)
         self.assertIn("dropTurn(turnId)", self.source)
 
+    def test_spoken_language_reroutes_the_turn_without_enter(self):
+        self.assertIn("routeSpokenTurn", read(API_JS))
+        self.assertIn("routeSpokenTurn(", self.source)
+        self.assertIn("flipped", self.source)
+
+    def test_continuation_only_glues_while_waiting_for_a_cue(self):
+        # Gluing every burst within 1.5s concatenates the other person's
+        # speech onto the open turn — fatal for free two-language talk.
+        begin = self.source.split("const beginUtterance")[1].split(
+            "const endUtterance"
+        )[0]
+        self.assertIn("pendingTranslateRef.current", begin)
+
+    def test_tts_chunks_are_enqueued_in_order(self):
+        enqueue = self.source.split("const enqueueTTS")[1].split(
+            "const sealTTSQueue"
+        )[0]
+        self.assertIn("enqueueChainRef", enqueue)
+
+    def test_continuation_cues_exclude_ordinary_endings(self):
+        cues = read(API_JS).split("const CONTINUATION_CUES")[1].split(
+            "export function endsWithContinuationCue"
+        )[0]
+        self.assertNotIn('"that"', cues)
+        self.assertNotIn('"så"', cues)
+        self.assertNotIn('"att"', cues)
+        self.assertIn('"och"', cues)
+        self.assertIn('"and"', cues)
+
+    def test_aec_converts_mic_index_into_tts_sample_time(self):
+        helpers = read(REPO_DIR / "frontend" / "src" / "utils" / "audioHelpers.js")
+        self.assertIn("export function farEndSampleIndex", helpers)
+        vad = read(REPO_DIR / "frontend" / "src" / "hooks" / "useVoiceActivity.js")
+        self.assertIn("farEndSampleIndex(", vad)
+        self.assertNotIn(
+            "Math.floor(t * tts.sampleRate) + i",
+            vad,
+            "AEC must not treat mic samples as TTS samples.",
+        )
+
 
 class TestStreamingEnvelopeContract(unittest.TestCase):
     def test_partials_are_suppressed_for_a_legacy_json_envelope(self):

@@ -344,16 +344,16 @@ The app has two lanes (two people facing each other on the kiosk):
 - **Lane 1 / Person 1** — the left/top lane.
 - **Lane 2 / Person 2** — the right/bottom lane.
 
-Each lane has a rotating language "revolver". The mic listens continuously; when the **active person** speaks, energy-based VAD starts a turn, and after a short silence the utterance is transcribed (Whisper STT), translated (Gemma), and spoken in the other lane's language (Piper TTS). **Enter** switches who is active. A switch mid-utterance still transcribes and plays that clip for the person who was speaking; the mic then listens as the other person.
+Each lane has a rotating language "revolver". The mic listens continuously. Speak in **either** of the two chosen languages — Whisper decides which lane the turn belongs to and Gemma translates into the other. **Enter** is only a prior (needed when both people use the same language). A switch mid-utterance still transcribes and plays that clip for the person who was speaking.
 
-The conversation is meant to feel like talk, not a walkie-talkie: the same speaker can continue the same row after a short pause; “mm”/“uh” are ignored; a trailing “och”/“and” waits for more speech; partial captions appear while you talk; TTS ducks instead of cutting when the other person takes the floor; “nej, jag menade…” repairs the last line; and Whisper may follow a language switch into the other lane.
+The conversation is meant to feel like talk, not a walkie-talkie: a trailing “och”/“and” waits for more speech from the same speaker; “mm”/“uh” are ignored; partial captions appear while you talk; TTS ducks instead of cutting when the other person takes the floor; “nej, jag menade…” repairs the last line; and speaker playback is subtracted from the mic so the translation does not start the next capture.
 
 ### Landscape Mode (default) — "active person"
 One lane is the **active person** at a time. The active lane is framed with **corner brackets on all four corners**.
 
 | Key | Action | Description |
 | :--- | :--- | :--- |
-| **Enter** | Switch active person | Toggles the active lane (Person 1 ⇄ Person 2). Mid-utterance switches still transcribe and play that clip, then listen as the other person. |
+| **Enter** | Switch active person | Sets who is expected next. Usually unnecessary: speaking the other lane's language flips the turn automatically. Mid-utterance switches still transcribe and play that clip. |
 | **← Left Arrow** | Previous language | Rotates the **active** person's language backward. |
 | **→ Right Arrow** | Next language | Rotates the **active** person's language forward. |
 
@@ -376,7 +376,8 @@ Same speech detection and **Enter** to switch the active person. Language rotati
 - **Input focus guard:** all shortcuts are ignored while focus is on a configuration field (`<input>`, `<textarea>`, or `<select>`).
 - **Capture lock:** language rotation is blocked while an utterance is being captured.
 - **Enter mid-utterance:** switching person closes the current capture as a finished turn. That clip still goes through STT → Gemma → TTS for the person who was speaking; the mic then listens as the other person.
-- **Same speaker, same row:** another burst within ~1.5 s is glued onto the open turn (and a trailing “och”/“and” waits for more). “Nej, jag menade…” shortly after STT repairs that row instead of opening a new one.
+- **Same speaker, same row:** a trailing “och”/“and” waits for more from that speaker and glues the next burst onto the open turn. Ordinary sentences are not held. “Nej, jag menade…” shortly after STT repairs that row instead of opening a new one.
+- **Either language:** the two revolver languages are the conversation pair. Speak either; the turn is attributed to that lane and translated into the other.
 - **TTS ducking:** the other person’s speech ducks playback instead of cutting it mid-word. Same-speaker continuation still replaces a stale translation.
 - **Mute during TTS:** VAD stays armed during STT/LLM so you can start another utterance while the first is still being transcribed. TTS is played through the shared AudioContext and subtracted from the mic with an NLMS echo canceller (plus browser AEC), so the translation spoken from the speakers is filtered out of the next capture. Barge-in ducks the current TTS when new speech is detected.
 

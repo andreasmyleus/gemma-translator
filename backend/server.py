@@ -156,7 +156,12 @@ def transcribe(audio_np, language, other_language=None, auto_language=False):
     expected = language if language in SUPPORTED_STT_LANGS else None
     other = other_language if other_language in SUPPORTED_STT_LANGS else None
     resolved = expected
-    if auto_language and expected is not None and len(audio_np) >= int(16000 * 0.6):
+    if (
+        auto_language
+        and expected is not None
+        and len(audio_np) >= int(16000 * 0.6)
+        and can_auto_detect_without_eviction(expected, other)
+    ):
         try:
             detector = get_whisper_model(DEFAULT_STT_MODEL)
             detected, prob, _ = detector.detect_language(audio_np)
@@ -200,6 +205,21 @@ def resolve_spoken_language(detected, probability, expected, other=None):
     if expected and prob < 0.6:
         return expected
     return code
+
+
+def can_auto_detect_without_eviction(expected, other=None):
+    """True when language-id can use a checkpoint that is already a lane model.
+
+    sv/en (and any pair that includes multilingual `small`) is free. Two
+    specialised checkpoints (sv/fi) would evict one of them to load `small`
+    just for detect — skip that and keep the lane prior.
+    """
+    ids = {stt_model_for(expected)}
+    if other:
+        ids.add(stt_model_for(other))
+    if DEFAULT_STT_MODEL in ids:
+        return True
+    return DEFAULT_STT_MODEL in _whisper_models
 
 
 # Överskrivbar så att bench/ kan köra en egen instans parallellt med en
@@ -415,6 +435,32 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(str(e).encode('utf-8'))
 
+    def handle_prewarm(self):
+        parsed_path = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed_path.query)
+        lang = query.get("lang", [None])[0]
+        if not lang or (
+            lang not in SUPPORTED_STT_LANGS and lang not in PIPER_VOICE_MAP
+        ):
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b'Error: Missing or unsupported "lang" parameter.')
+            return
+        try:
+            if lang in SUPPORTED_STT_LANGS:
+                get_whisper_model(stt_model_for(lang))
+            if lang in PIPER_VOICE_MAP:
+                get_piper_voice(lang)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True, "lang": lang}).encode("utf-8"))
+        except Exception as e:
+            traceback.print_exc()
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode("utf-8"))
+
     def handle_volume(self):
         client_ip = self.client_address[0]
         if client_ip not in ('127.0.0.1', '::1', 'localhost'):
@@ -556,6 +602,10 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if self.path.startswith('/api/tts'):
             self.handle_tts()
+            return
+
+        if self.path.startswith('/api/prewarm'):
+            self.handle_prewarm()
             return
             
         if self.path.startswith('/api/volume'):

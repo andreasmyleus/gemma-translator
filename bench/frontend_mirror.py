@@ -25,7 +25,8 @@ Speglar:
   frontend/src/utils/api.js       envelope-vakten i translateTextStreaming
   frontend/src/utils/api.js       isBackchannel / endsWithContinuationCue /
                                   isRepairUtterance / stripRepairCue /
-                                  normalizeSttText
+                                  normalizeSttText / routeSpokenTurn
+  frontend/src/utils/audioHelpers.js  farEndSampleIndex
   frontend/src/TranslatorApp.jsx  systemprompten i processTranslation
   frontend/src/TranslatorApp.jsx  speakCompleteSentences
 
@@ -33,6 +34,7 @@ Speglar:
 """
 
 import json
+import math
 import re
 
 SPEECH_CHUNK_LIMIT = 180
@@ -68,6 +70,8 @@ def is_backchannel(text):
     return bool(stripped) and bool(_BACKCHANNEL_RE.match(stripped))
 
 
+# Only conjunctions people actually trail off on. "så"/"that"/"att" are
+# ordinary sentence endings and must not delay translation.
 CONTINUATION_CUES = frozenset(
     {
         "och",
@@ -76,26 +80,28 @@ CONTINUATION_CUES = frozenset(
         "but",
         "or",
         "eller",
-        "så",
-        "so",
-        "sen",
-        "then",
-        "att",
-        "that",
-        "för",
-        "because",
         "y",
         "et",
         "mais",
-        "que",
-        "porque",
-        "um",
-        "uh",
-        "öh",
-        "eh",
-        "euh",
     }
 )
+
+
+def route_spoken_turn(detected_code, active_lane, src, dst, lang1, lang2):
+    """Port av routeSpokenTurn — attribute the turn to whichever lane language was spoken."""
+    del lang1, lang2  # reserved for the JS signature; unused once src/dst are the pair
+    code = (detected_code or "").split("-")[0].lower()
+    if code and code == dst.get("code"):
+        other = 2 if active_lane == 1 else 1
+        return {"lane": other, "src": dst, "dst": src, "flipped": True}
+    return {"lane": active_lane, "src": src, "dst": dst, "flipped": False}
+
+
+def far_end_sample_index(elapsed_sec, mic_index, tts_rate, mic_rate):
+    """Port av farEndSampleIndex — map mic-frame time onto the TTS PCM clock."""
+    if not mic_rate:
+        return math.floor(elapsed_sec * tts_rate) + int(mic_index)
+    return math.floor(elapsed_sec * tts_rate + mic_index * (tts_rate / mic_rate))
 
 
 def ends_with_continuation_cue(text):

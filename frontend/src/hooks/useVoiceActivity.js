@@ -15,17 +15,22 @@
  */
 
 import { useState, useRef, useCallback, useEffect } from "react"
-import { getMergedSamples, resample, samplesToBase64Pcm } from "../utils/audioHelpers"
+import {
+  farEndSampleIndex,
+  getMergedSamples,
+  resample,
+  samplesToBase64Pcm,
+} from "../utils/audioHelpers"
 
 // Energy-based VAD for continuous kiosk listening, with a short NLMS echo
 // canceller so TTS played from the speakers is subtracted from the mic before
 // VAD / capture. That lets the user keep talking while the previous turn is
 // still being transcribed or spoken without the translation leaking in.
 
-const SPEECH_RMS = 0.02
+const SPEECH_RMS = 0.015
 const SILENCE_MS_SHORT = 560
 const SILENCE_MS_LONG = 1250
-const MIN_SPEECH_MS = 400
+const MIN_SPEECH_MS = 220
 const MAX_UTTERANCE_MS = 15000
 const PRE_ROLL_CHUNKS = 4
 const INTERIM_MS = 1100
@@ -104,6 +109,7 @@ export function useVoiceActivity({
   const speechStartedAtRef = useRef(0)
   const lastLoudAtRef = useRef(0)
   const lastLoudRmsRef = useRef(0)
+  const noiseFloorRef = useRef(0.006)
   const sampleRateRef = useRef(16000)
   const silenceHoldMsRef = useRef(0)
   const lastInterimAtRef = useRef(0)
@@ -275,10 +281,11 @@ export function useVoiceActivity({
     let xIdx = aecIdxRef.current
     let unstable = false
 
+    const elapsedSec = ctx.currentTime - tts.startedAt
+    const micRate = ctx.sampleRate || sampleRateRef.current
     for (let i = 0; i < near.length; i++) {
       let far = 0
-      const t = ctx.currentTime - tts.startedAt
-      const idx = Math.floor(t * tts.sampleRate) + i
+      const idx = farEndSampleIndex(elapsedSec, i, tts.sampleRate, micRate)
       if (idx >= 0 && idx < tts.data.length) {
         far = tts.data[idx] * (tts.gain ?? 1)
       }
@@ -330,7 +337,11 @@ export function useVoiceActivity({
           preRollRef.current.shift()
         }
         if (!armedRef.current) return
-        if (rms < SPEECH_RMS) return
+        const threshold = Math.max(SPEECH_RMS * 0.7, noiseFloorRef.current * 3.5)
+        if (rms < threshold) {
+          noiseFloorRef.current = noiseFloorRef.current * 0.98 + rms * 0.02
+          return
+        }
 
         capturingRef.current = true
         setIsCapturing(true)
