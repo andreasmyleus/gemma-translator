@@ -152,7 +152,7 @@ export default function TranscriptView({
         </div>
       ) : null}
       {turns.length === 0 && !micError ? (
-        <div className="transcript-empty">Select languages, push to talk</div>
+        <div className="transcript-empty">Select languages, then speak</div>
       ) : null}
     </div>
   )

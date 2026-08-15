@@ -344,50 +344,50 @@ The app has two lanes (two people facing each other on the kiosk):
 - **Lane 1 / Person 1** — the left/top lane.
 - **Lane 2 / Person 2** — the right/bottom lane.
 
-Each lane has a rotating language "revolver" and records speech, which is transcribed (Whisper STT), translated (Gemma), and spoken back in the other lane's language (Piper TTS).
+Each lane has a rotating language "revolver". The mic listens continuously. Speak in **either** of the two chosen languages — Whisper decides which lane the turn belongs to and Gemma translates into the other. **Enter** is only a prior (needed when both people use the same language). A switch mid-utterance still transcribes and plays that clip for the person who was speaking.
+
+The conversation is meant to feel like talk, not a walkie-talkie: a trailing “och”/“and” waits for more speech from the same speaker; “mm”/“uh” are ignored; partial captions appear while you talk; TTS ducks instead of cutting when the other person takes the floor; “nej, jag menade…” repairs the last line; and speaker playback is subtracted from the mic so the translation does not start the next capture.
 
 ### Landscape Mode (default) — "active person"
-One lane is the **active person** at a time. The active lane is framed with **corner brackets on all four corners**. You drive everything from a single set of keys and switch focus with Enter.
+One lane is the **active person** at a time. The active lane is framed with **corner brackets on all four corners**.
 
 | Key | Action | Description |
 | :--- | :--- | :--- |
-| **Enter** | Switch active person | Toggles the active lane (Person 1 ⇄ Person 2). Disabled while recording. |
-| **Spacebar** | Record (push-to-talk) | Hold to record the **active** person; release to transcribe & translate. |
+| **Enter** | Switch active person | Sets who is expected next. Usually unnecessary: speaking the other lane's language flips the turn automatically. Mid-utterance switches still transcribe and play that clip. |
 | **← Left Arrow** | Previous language | Rotates the **active** person's language backward. |
 | **→ Right Arrow** | Next language | Rotates the **active** person's language forward. |
 
 Notes:
-- The active lane shows four-corner brackets; while it is recording, the brackets invert to black along with the lane's color reversal.
+- Speak to talk — no Spacebar. The active lane shows four-corner brackets; while capturing, the brackets invert with the lane.
 - Best for one-handed / single-operator use.
 
-### Vertical Mode — "two-hand" (original mapping)
-Each lane has its **own dedicated keys** — there is no active-person concept and **no bracket highlight**. Both people can be controlled independently.
+### Vertical Mode — language keys per lane
+Same speech detection and **Enter** to switch the active person. Language rotation uses separate keys per lane.
 
 | Key | Action | Description |
 | :--- | :--- | :--- |
-| **Z** | Record — Person 1 (push-to-talk) | Hold to record Lane 1; release to transcribe & translate. |
-| **X** | Record — Person 2 (push-to-talk) | Hold to record Lane 2; release to transcribe & translate. |
+| **Enter** | Switch active person | Same as landscape. |
 | **← Left Arrow** | Previous language — Person 1 | Rotates Lane 1's language backward. |
 | **→ Right Arrow** | Next language — Person 1 | Rotates Lane 1's language forward. |
 | **− Minus** (`_`) | Previous language — Person 2 | Rotates Lane 2's language backward. |
 | **+ Plus** (`=`) | Next language — Person 2 | Rotates Lane 2's language forward. |
 
-Notes:
-- No corner-bracket selection highlight in this mode.
-- Best for two operators, each handling their own side.
-
 ### Common behavior (both modes)
-- **Input focus guard:** all shortcuts are ignored while focus is on a configuration field (`<input>`, `<textarea>`, or `<select>`) — e.g. when editing the API endpoint or settings.
-- **Recording lock:** language rotation is blocked while a recording is in progress.
-- **Keyboard-driven:** recording and language rotation are keyboard-only in the current build; on-screen touch controls are not enabled.
+- **Input focus guard:** all shortcuts are ignored while focus is on a configuration field (`<input>`, `<textarea>`, or `<select>`).
+- **Capture lock:** language rotation is blocked while an utterance is being captured.
+- **Enter mid-utterance:** switching person closes the current capture as a finished turn. That clip still goes through STT → Gemma → TTS for the person who was speaking; the mic then listens as the other person.
+- **Same speaker, same row:** a trailing “och”/“and” waits for more from that speaker and glues the next burst onto the open turn. Ordinary sentences are not held. “Nej, jag menade…” shortly after STT repairs that row instead of opening a new one.
+- **Either language:** the two revolver languages are the conversation pair. Speak either; the turn is attributed to that lane and translated into the other.
+- **TTS ducking:** the other person’s speech ducks playback instead of cutting it mid-word. Same-speaker continuation still replaces a stale translation.
+- **Mute during TTS:** VAD stays armed during STT/LLM so you can start another utterance while the first is still being transcribed. TTS is played through the shared AudioContext and subtracted from the mic with an NLMS echo canceller (plus browser AEC), so the translation spoken from the speakers is filtered out of the next capture. Barge-in ducks the current TTS when new speech is detected.
 
 ### Switching modes
 Open **Settings (⚙)** → **Keyboard Mode** → choose **Landscape** or **Vertical**. The change takes effect immediately and persists on the device.
 
 | Setting value | Mode |
 | :--- | :--- |
-| `landscape` | Active-person scheme (Enter / Space / ← →) — default |
-| `vertical` | Two-hand scheme (Z / X / ← → / − +) |
+| `landscape` | Active-person scheme (Enter / speak / ← →) — default |
+| `vertical` | Enter to switch person; ← → and − + rotate languages per lane |
 
 ### Credits
 Made by a small team at [Google Creative Lab](https://github.com/googlecreativelab):

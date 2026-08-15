@@ -16,10 +16,18 @@ import unittest
 
 from bench.frontend_mirror import (
     build_llm_payload,
+    ends_with_continuation_cue,
+    far_end_sample_index,
     first_sentence_end,
+    is_backchannel,
+    is_repair_utterance,
+    is_speakable,
     looks_like_json_envelope,
+    normalize_stt_text,
     parse_translation,
+    route_spoken_turn,
     split_text_into_speech_chunks,
+    strip_repair_cue,
     system_prompt,
     system_prompt_json,
 )
@@ -34,6 +42,11 @@ class TestSplitTextIntoSpeechChunks(unittest.TestCase):
 
     def test_empty_text_yields_no_chunks(self):
         self.assertEqual(split_text_into_speech_chunks(""), [])
+
+    def test_punctuation_only_yields_no_chunks(self):
+        self.assertEqual(split_text_into_speech_chunks("."), [])
+        self.assertEqual(split_text_into_speech_chunks("..."), [])
+        self.assertEqual(split_text_into_speech_chunks("?!"), [])
 
     def test_splits_on_word_boundary_under_limit(self):
         text = " ".join(["ord"] * 10)  # 10 * 4 - 1 = 39 tecken
@@ -53,6 +66,117 @@ class TestSplitTextIntoSpeechChunks(unittest.TestCase):
             split_text_into_speech_chunks("ett   två\n\ttre"),
             ["ett två tre"],
         )
+
+
+class TestConversationHelpers(unittest.TestCase):
+    def test_backchannel_is_filler_not_an_answer(self):
+        self.assertTrue(is_backchannel("mm"))
+        self.assertTrue(is_backchannel("Mhm."))
+        self.assertTrue(is_backchannel("uh"))
+        self.assertTrue(is_backchannel("öh"))
+        self.assertFalse(is_backchannel("ja"))
+        self.assertFalse(is_backchannel("yes"))
+        self.assertFalse(is_backchannel("Var ligger stationen?"))
+
+    def test_trailing_conjunction_holds_the_turn(self):
+        self.assertTrue(ends_with_continuation_cue("Jag vill ha kaffe och"))
+        self.assertTrue(ends_with_continuation_cue("I want coffee and"))
+        self.assertTrue(ends_with_continuation_cue("Quiero café y"))
+        self.assertFalse(ends_with_continuation_cue("Var ligger stationen?"))
+        self.assertFalse(ends_with_continuation_cue("ja"))
+
+    def test_finished_sentences_are_not_held_as_continuations(self):
+        # "that" / "så" / "att" are normal sentence endings, not trail-offs.
+        # Holding them added ~1.5s of dead air to ordinary turns.
+        self.assertFalse(ends_with_continuation_cue("I need that"))
+        self.assertFalse(ends_with_continuation_cue("Ja, så."))
+        self.assertFalse(ends_with_continuation_cue("Jag vet att"))
+        self.assertFalse(ends_with_continuation_cue("Thanks for that"))
+
+    def test_repair_cue_strips_the_preamble(self):
+        self.assertTrue(is_repair_utterance("Nej, var ligger toaletten?"))
+        self.assertTrue(is_repair_utterance("I mean the station"))
+        self.assertFalse(is_repair_utterance("Var ligger stationen?"))
+        self.assertEqual(
+            strip_repair_cue("Nej, var ligger toaletten?"),
+            "var ligger toaletten?",
+        )
+        self.assertEqual(strip_repair_cue("Nej"), "Nej")
+
+    def test_whisper_nospeech_tokens_are_stripped(self):
+        self.assertEqual(normalize_stt_text("<|nospeech|> ."), ".")
+        self.assertEqual(normalize_stt_text("<|nospeech|>"), "")
+        self.assertFalse(is_speakable(normalize_stt_text("<|nospeech|> .")))
+        self.assertEqual(
+            normalize_stt_text("Hej <|nospeech|> där"),
+            "Hej där",
+        )
+
+
+class TestRouteSpokenTurn(unittest.TestCase):
+    """Two people pick a language each and just talk — no Enter required.
+
+    STT says which of the two languages was spoken; the turn is attributed
+    to that lane and translated into the other.
+    """
+
+    SV = {"code": "sv", "name": "Swedish", "ttsLang": "sv"}
+    EN = {"code": "en", "name": "English", "ttsLang": "en"}
+    FI = {"code": "fi", "name": "Finnish", "ttsLang": "fi"}
+
+    def test_other_lane_language_flips_speaker_and_direction(self):
+        routed = route_spoken_turn("en", 1, self.SV, self.EN, self.SV, self.EN)
+        self.assertEqual(routed["lane"], 2)
+        self.assertEqual(routed["src"]["code"], "en")
+        self.assertEqual(routed["dst"]["code"], "sv")
+        self.assertTrue(routed["flipped"])
+
+    def test_expected_language_keeps_the_active_lane(self):
+        routed = route_spoken_turn("sv", 1, self.SV, self.EN, self.SV, self.EN)
+        self.assertEqual(routed["lane"], 1)
+        self.assertEqual(routed["src"]["code"], "sv")
+        self.assertEqual(routed["dst"]["code"], "en")
+        self.assertFalse(routed["flipped"])
+
+    def test_unknown_or_third_language_keeps_the_lane_prior(self):
+        routed = route_spoken_turn("de", 1, self.SV, self.EN, self.SV, self.EN)
+        self.assertEqual(routed["lane"], 1)
+        self.assertEqual(routed["src"]["code"], "sv")
+        self.assertFalse(routed["flipped"])
+        routed = route_spoken_turn("fi", 2, self.EN, self.SV, self.SV, self.EN)
+        self.assertEqual(routed["lane"], 2)
+        self.assertFalse(routed["flipped"])
+
+    def test_region_suffix_is_ignored(self):
+        routed = route_spoken_turn("en-US", 1, self.SV, self.EN, self.SV, self.EN)
+        self.assertEqual(routed["lane"], 2)
+        self.assertTrue(routed["flipped"])
+
+
+class TestFarEndSampleIndex(unittest.TestCase):
+    """AEC far-end index must convert mic time into TTS sample time.
+
+    Piper is 22050 Hz; the AudioContext is typically 48000 Hz. Adding the
+    mic frame index as if the rates matched reads the reference ~2× too
+    fast, so TTS leaked into the next capture.
+    """
+
+    def test_same_rate_is_just_offset_plus_index(self):
+        self.assertEqual(far_end_sample_index(0.0, 10, 48000, 48000), 10)
+        self.assertEqual(far_end_sample_index(0.5, 0, 48000, 48000), 24000)
+
+    def test_piper_rate_against_48k_mic_scales_the_index(self):
+        # 1 ms into playback, 48th mic sample of the frame → still ~1 ms of TTS.
+        idx = far_end_sample_index(0.001, 48, 22050, 48000)
+        self.assertEqual(idx, 44)  # floor(0.001*22050 + 48*22050/48000) = 44
+
+    def test_old_plus_i_formula_is_wrong_across_rates(self):
+        elapsed = 0.001
+        i = 48
+        tts_rate = 22050
+        wrong = int(elapsed * tts_rate) + i
+        right = far_end_sample_index(elapsed, i, tts_rate, 48000)
+        self.assertNotEqual(wrong, right)
 
 
 class TestSystemPrompt(unittest.TestCase):

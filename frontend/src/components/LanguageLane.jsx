@@ -57,7 +57,7 @@ export default function LanguageLane({
       <div className="lane-header">
         <span className="lane-label">{laneLabel}</span>
         {recordKeyHint ? (
-          <span className="key-hint" title="Hold to talk, release to translate">
+          <span className="key-hint" title="Speak to talk">
             {recordKeyHint}
           </span>
         ) : null}

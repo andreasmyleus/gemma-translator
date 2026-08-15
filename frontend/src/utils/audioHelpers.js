@@ -60,3 +60,33 @@ export function blobToBase64(blob) {
     reader.readAsDataURL(blob)
   })
 }
+
+export function concatSamples(a, b) {
+  if (!a || !a.length) return b
+  if (!b || !b.length) return a
+  const out = new Float32Array(a.length + b.length)
+  out.set(a, 0)
+  out.set(b, a.length)
+  return out
+}
+
+// Map a mic-frame sample onto the TTS (far-end) PCM clock. Piper is 22050 Hz
+// and the AudioContext is typically 48000 Hz — adding `micIndex` as if the
+// rates matched reads the reference ~2× too fast and leaks TTS into capture.
+export function farEndSampleIndex(elapsedSec, micIndex, ttsRate, micRate) {
+  if (!micRate) return Math.floor(elapsedSec * ttsRate) + (micIndex | 0)
+  return Math.floor(elapsedSec * ttsRate + micIndex * (ttsRate / micRate))
+}
+
+export async function samplesToBase64Pcm(samples) {
+  const rawBlob = new Blob(
+    [
+      samples.buffer.slice(
+        samples.byteOffset,
+        samples.byteOffset + samples.byteLength,
+      ),
+    ],
+    { type: "application/octet-stream" },
+  )
+  return blobToBase64(rawBlob)
+}
