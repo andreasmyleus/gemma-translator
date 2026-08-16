@@ -344,7 +344,7 @@ The app has two lanes (two people facing each other on the kiosk):
 - **Lane 1 / Person 1** — the left/top lane.
 - **Lane 2 / Person 2** — the right/bottom lane.
 
-Each lane has a rotating language "revolver". The mic listens continuously. Speak in **either** of the two chosen languages — Whisper decides which lane the turn belongs to and Gemma translates into the other. **Enter** is only a prior (needed when both people use the same language). A switch mid-utterance still transcribes and plays that clip for the person who was speaking.
+Each lane has a rotating language "revolver". The mic listens continuously; energy-based VAD starts a turn when someone speaks, and after a short silence the utterance is transcribed (Whisper STT), translated (Gemma), and spoken in the other lane's language (Piper TTS). Speak in **either** of the two chosen languages — Whisper decides which lane the turn belongs to. **Enter** switches who is expected next (needed when both people use the same language). A switch mid-utterance still transcribes and plays that clip for the person who was speaking; the mic then listens as the other person.
 
 The conversation is meant to feel like talk, not a walkie-talkie: a trailing “och”/“and” waits for more speech from the same speaker; “mm”/“uh” are ignored; partial captions appear while you talk; TTS ducks instead of cutting when the other person takes the floor; “nej, jag menade…” repairs the last line; and speaker playback is subtracted from the mic so the translation does not start the next capture.
 
@@ -353,7 +353,7 @@ One lane is the **active person** at a time. The active lane is framed with **co
 
 | Key | Action | Description |
 | :--- | :--- | :--- |
-| **Enter** | Switch active person | Sets who is expected next. Usually unnecessary: speaking the other lane's language flips the turn automatically. Mid-utterance switches still transcribe and play that clip. |
+| **Enter** | Switch active person | Sets who is expected next. Usually unnecessary: speaking the other lane's language flips the turn automatically. Mid-utterance switches still transcribe and play that clip, then listen as the other person. |
 | **← Left Arrow** | Previous language | Rotates the **active** person's language backward. |
 | **→ Right Arrow** | Next language | Rotates the **active** person's language forward. |
 

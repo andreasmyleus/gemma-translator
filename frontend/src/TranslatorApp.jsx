@@ -288,7 +288,7 @@ function TranslatorApp({ config, clearConversationRef }) {
   )
 
   const enqueueTTS = useCallback(
-    (text, targetLang, marks) => {
+    async (text, targetLang, marks) => {
       if (!text) return
       const gen = enqueueGenRef.current
       const run = async () => {

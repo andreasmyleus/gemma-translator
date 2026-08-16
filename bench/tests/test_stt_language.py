@@ -15,6 +15,7 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_DIR / "backend"))
@@ -22,6 +23,7 @@ sys.path.insert(0, str(REPO_DIR / "backend"))
 from server import (  # noqa: E402
     DEFAULT_STT_MODEL,
     can_auto_detect_without_eviction,
+    keep_stt_segment,
     resolve_spoken_language,
     _whisper_models,
 )
@@ -58,6 +60,23 @@ class TestResolveSpokenLanguage(unittest.TestCase):
             self.assertTrue(can_auto_detect_without_eviction("sv", "fi"))
         finally:
             _whisper_models.clear()
+
+
+class TestKeepSttSegment(unittest.TestCase):
+    def test_keeps_real_speech(self):
+        seg = SimpleNamespace(text="Var ligger stationen?", no_speech_prob=0.05)
+        self.assertTrue(keep_stt_segment(seg))
+
+    def test_drops_confident_silence_hallucination(self):
+        # High logprob radio copy still has high no_speech_prob.
+        seg = SimpleNamespace(
+            text="Juniormusikens sändning av Melodifestivalen visas idag.",
+            no_speech_prob=0.72,
+        )
+        self.assertFalse(keep_stt_segment(seg))
+
+    def test_drops_empty_text(self):
+        self.assertFalse(keep_stt_segment(SimpleNamespace(text="  ", no_speech_prob=0.0)))
 
 
 if __name__ == "__main__":

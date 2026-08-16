@@ -221,7 +221,8 @@ export default function SettingsOverlay({
                     <kbd>Enter</kbd> switch active person
                   </li>
                   <li>
-                    Speak in either chosen language — the translator follows
+                    Speak in either chosen language — mic detects speech,
+                    silence ends the turn
                   </li>
                   <li>
                     <kbd>←</kbd> <kbd>→</kbd> change active language
@@ -241,6 +242,7 @@ export default function SettingsOverlay({
                   <li>
                     Speak in either chosen language — the translator follows
                   </li>
+                  <li>Speak — mic detects speech for the active person</li>
                   <li>
                     <kbd>←</kbd> <kbd>→</kbd> person 1 language
                   </li>
@@ -256,7 +258,8 @@ export default function SettingsOverlay({
               routes the turn and Enter is only needed when both people use
               the same language. TTS ducks on barge-in; speaker echo is
               filtered from the mic. Language changes are locked while
-              capturing.
+              capturing. Extra speech during transcription is captured as a
+              new turn.
             </p>
           </div>
         </div>

@@ -52,7 +52,15 @@ STT_MODEL_MAP = {
 # Optimeringar hålls bakom flaggor så att bench kan A/B-testa dem i samma
 # körning, och så att produkten behåller sitt ursprungsbeteende tills en
 # ändring är uppmätt. Defaultarna flippas när kampanjen är klar.
-STT_VAD = os.environ.get("STT_VAD", "0") == "1"
+# Hallucinations on silence: skip a segment when Whisper itself thinks it
+# heard no speech, even if avg_logprob is high (the usual skip rule requires
+# *both* high no_speech_prob and low logprob, which confident radio-copy
+# hallucinations fail).
+STT_NO_SPEECH_PROB = float(os.environ.get("STT_NO_SPEECH_PROB", "0.5"))
+# Trim silence before decode. Left env-gated off during the latency campaign
+# (null on time-to-first-audio); continuous listening made the quality win
+# the default — set STT_VAD=0 to restore the old path.
+STT_VAD = os.environ.get("STT_VAD", "1") == "1"
 MAX_MODELS = 2
 # Loaded at startup so the two default lanes never stall on a first utterance.
 # Keep this within MAX_MODELS or the entries just evict each other.
@@ -144,6 +152,23 @@ def get_whisper_model(model_id=None):
         )
         return _whisper_models[model_id]
 
+def keep_stt_segment(segment):
+    """False when Whisper is decoding silence as confident radio/TV copy.
+
+    Built-in skip requires high no_speech_prob *and* low avg_logprob.
+    KB-Whisper hallucinations on room tone often have high logprob, so we
+    drop on no_speech_prob alone.
+    """
+    text = (getattr(segment, "text", None) or "").strip()
+    if not text:
+        return False
+    try:
+        no_speech = float(getattr(segment, "no_speech_prob", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        no_speech = 0.0
+    return no_speech < STT_NO_SPEECH_PROB
+
+
 def transcribe(audio_np, language, other_language=None, auto_language=False):
     """Transcribe 16 kHz mono float32 samples.
 
@@ -175,12 +200,21 @@ def transcribe(audio_np, language, other_language=None, auto_language=False):
         audio_np,
         language=resolved if resolved in SUPPORTED_STT_LANGS else None,
         beam_size=1,
-        # Klipper bort tystnad före dekodning. Kortar ljudet som når modellen
-        # och tar bort de hallucinationer stock-Whisper gärna producerar på
-        # tysta partier.
+        condition_on_previous_text=False,
+        no_speech_threshold=STT_NO_SPEECH_PROB,
         vad_filter=STT_VAD,
     )
-    text = " ".join(s.text.strip() for s in segments)
+    parts = []
+    for segment in segments:
+        if not keep_stt_segment(segment):
+            print(
+                f"[STT] drop hallucination no_speech_prob="
+                f"{getattr(segment, 'no_speech_prob', 0):.2f}: {segment.text!r}",
+                flush=True,
+            )
+            continue
+        parts.append(segment.text.strip())
+    text = " ".join(parts)
     out_lang = resolved or getattr(info, "language", None) or expected or "en"
     return text, out_lang
 
