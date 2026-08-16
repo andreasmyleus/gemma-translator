@@ -31,6 +31,8 @@ from bench.frontend_mirror import system_prompt
 REPO_DIR = pathlib.Path(__file__).resolve().parents[2]
 TRANSLATOR_APP = REPO_DIR / "frontend" / "src" / "TranslatorApp.jsx"
 API_JS = REPO_DIR / "frontend" / "src" / "utils" / "api.js"
+VAD_JS = REPO_DIR / "frontend" / "src" / "hooks" / "useVoiceActivity.js"
+SERVER_PY = REPO_DIR / "backend" / "server.py"
 
 
 def read(path):
@@ -149,6 +151,14 @@ class TestPlaybackPathContract(unittest.TestCase):
         self.assertIn("normalizeSttText", read(API_JS))
         self.assertIn("normalizeSttText(stt.text", self.source)
         self.assertIn("dropTurn(turnId)", self.source)
+
+    def test_silence_is_not_sent_to_whisper_as_radio_copy(self):
+        vad = read(VAD_JS)
+        self.assertIn("AudioContext resumed", vad)
+        self.assertIn("mute.gain.value = 0", vad)
+        server = read(SERVER_PY)
+        self.assertIn("condition_on_previous_text=False", server)
+        self.assertIn("keep_stt_segment", server)
 
 
 class TestStreamingEnvelopeContract(unittest.TestCase):

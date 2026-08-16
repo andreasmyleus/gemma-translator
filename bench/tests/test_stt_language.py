@@ -15,11 +15,12 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_DIR / "backend"))
 
-from server import resolve_spoken_language  # noqa: E402
+from server import keep_stt_segment, resolve_spoken_language  # noqa: E402
 
 
 class TestResolveSpokenLanguage(unittest.TestCase):
@@ -37,6 +38,23 @@ class TestResolveSpokenLanguage(unittest.TestCase):
 
     def test_strips_region_suffix(self):
         self.assertEqual(resolve_spoken_language("en-US", 0.9, "sv", "en"), "en")
+
+
+class TestKeepSttSegment(unittest.TestCase):
+    def test_keeps_real_speech(self):
+        seg = SimpleNamespace(text="Var ligger stationen?", no_speech_prob=0.05)
+        self.assertTrue(keep_stt_segment(seg))
+
+    def test_drops_confident_silence_hallucination(self):
+        # High logprob radio copy still has high no_speech_prob.
+        seg = SimpleNamespace(
+            text="Juniormusikens sändning av Melodifestivalen visas idag.",
+            no_speech_prob=0.72,
+        )
+        self.assertFalse(keep_stt_segment(seg))
+
+    def test_drops_empty_text(self):
+        self.assertFalse(keep_stt_segment(SimpleNamespace(text="  ", no_speech_prob=0.0)))
 
 
 if __name__ == "__main__":

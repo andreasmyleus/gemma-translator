@@ -22,7 +22,7 @@ import { getMergedSamples, resample, samplesToBase64Pcm } from "../utils/audioHe
 // VAD / capture. That lets the user keep talking while the previous turn is
 // still being transcribed or spoken without the translation leaking in.
 
-const SPEECH_RMS = 0.02
+const SPEECH_RMS = 0.015
 const SILENCE_MS_SHORT = 560
 const SILENCE_MS_LONG = 1250
 const MIN_SPEECH_MS = 400
@@ -55,7 +55,14 @@ async function samplesToPayload(samples, sampleRate) {
     peak = 1
   }
   const durationMs = ((resampledSamples.length / targetSampleRate) * 1000) | 0
-  console.log(`[vad] ${durationMs}ms, peak=${peak.toFixed(3)}`)
+  let sumSq = 0
+  for (let i = 0; i < resampledSamples.length; i++) {
+    sumSq += resampledSamples[i] * resampledSamples[i]
+  }
+  const rms = resampledSamples.length ? Math.sqrt(sumSq / resampledSamples.length) : 0
+  console.log(
+    `[vad] ${durationMs}ms, peak=${peak.toFixed(3)}, rms=${rms.toFixed(3)}`,
+  )
 
   const base64Data = await samplesToBase64Pcm(resampledSamples)
   return { base64Data, samples: resampledSamples, durationMs }
@@ -109,6 +116,8 @@ export function useVoiceActivity({
   const lastInterimAtRef = useRef(0)
   const interimBusyRef = useRef(false)
   const ttsDuckRef = useRef(1)
+  // Bumped on every stop so a late getUserMedia cannot resurrect a torn-down graph.
+  const listenGenRef = useRef(0)
   // Snapshot returned by onSpeechStart — passed back on end so a later
   // utterance cannot steal this capture's turn (Enter / overlapping speech).
   const captureContextRef = useRef(null)
@@ -218,6 +227,7 @@ export function useVoiceActivity({
     preRollRef.current = []
     speechStartedAtRef.current = 0
     lastLoudAtRef.current = 0
+    lastLoudRmsRef.current = 0
     captureContextRef.current = null
   }, [])
 
@@ -376,7 +386,7 @@ export function useVoiceActivity({
           try {
             const merged = getMergedSamples(snap)
             const payload = await samplesToPayload(merged, sampleRateRef.current)
-            onInterimRef.current?.(payload, ctx)
+            if (payload) onInterimRef.current?.(payload, ctx)
           } catch (err) {
             console.error("VAD interim encode failed:", err)
           } finally {
@@ -391,10 +401,11 @@ export function useVoiceActivity({
   const startListening = useCallback(async () => {
     if (streamRef.current || scriptProcessorRef.current) return true
     setMicError(null)
+    const gen = ++listenGenRef.current
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          // Browser AEC on: mic tap does not go to speakers (MediaStreamDestination
+          // Browser AEC on: mic tap does not go to speakers (zero-gain keep-alive
           // below), so AEC can cancel real TTS from the loudspeaker. Software
           // NLMS above is the backup when browser AEC is weak.
           echoCancellation: true,
@@ -403,6 +414,10 @@ export function useVoiceActivity({
           channelCount: 1,
         },
       })
+      if (gen !== listenGenRef.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        return false
+      }
       streamRef.current = stream
 
       const AudioContext = window.AudioContext || window.webkitAudioContext
@@ -410,8 +425,19 @@ export function useVoiceActivity({
       if (audioContextRef.current.state === "suspended") {
         await audioContextRef.current.resume()
       }
+      if (gen !== listenGenRef.current) {
+        teardownGraph()
+        if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+          await audioContextRef.current.close()
+          audioContextRef.current = null
+        }
+        return false
+      }
       sampleRateRef.current = audioContextRef.current.sampleRate
       resetAec()
+      console.log(
+        `[vad] listening @ ${sampleRateRef.current}Hz, ctx=${audioContextRef.current.state}`,
+      )
 
       const ttsGain = audioContextRef.current.createGain()
       ttsGain.gain.value = ttsDuckRef.current
@@ -434,12 +460,15 @@ export function useVoiceActivity({
       scriptProcessorRef.current = scriptProcessor
       scriptProcessor.onaudioprocess = handleAudioProcess
 
-      // Keep the processor alive without feeding mic to the speakers (that
-      // would make browser AEC fight itself).
-      const tapDest = audioContextRef.current.createMediaStreamDestination()
-      tapDestRef.current = tapDest
+      // Keep ScriptProcessor alive without audible mic bleed. A zero-gain
+      // connection to destination is more reliable than MediaStreamDestination
+      // alone (some Chromium builds stop firing otherwise).
+      const mute = audioContextRef.current.createGain()
+      mute.gain.value = 0
+      tapDestRef.current = mute
       source.connect(scriptProcessor)
-      scriptProcessor.connect(tapDest)
+      scriptProcessor.connect(mute)
+      mute.connect(audioContextRef.current.destination)
 
       setIsListening(true)
       return true
@@ -456,6 +485,7 @@ export function useVoiceActivity({
   }, [handleAudioProcess, teardownGraph, resetAec])
 
   const stopListening = useCallback(async () => {
+    listenGenRef.current += 1
     discardCapture()
     teardownGraph()
     setAnalyser(null)
@@ -476,6 +506,25 @@ export function useVoiceActivity({
       void stopListening()
     }
   }, [enabled, startListening, stopListening])
+
+  // After a hard reload the AudioContext often stays suspended until a user
+  // gesture. Resume on the first click/key so VAD actually receives frames.
+  useEffect(() => {
+    const resume = () => {
+      const ctx = audioContextRef.current
+      if (ctx && ctx.state === "suspended") {
+        void ctx.resume().then(() => {
+          console.log(`[vad] AudioContext resumed → ${ctx.state}`)
+        })
+      }
+    }
+    window.addEventListener("pointerdown", resume)
+    window.addEventListener("keydown", resume)
+    return () => {
+      window.removeEventListener("pointerdown", resume)
+      window.removeEventListener("keydown", resume)
+    }
+  }, [])
 
   useEffect(() => {
     if (scriptProcessorRef.current) {
