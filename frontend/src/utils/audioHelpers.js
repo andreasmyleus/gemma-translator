@@ -70,6 +70,14 @@ export function concatSamples(a, b) {
   return out
 }
 
+// Map a mic-frame sample onto the TTS (far-end) PCM clock. Piper is 22050 Hz
+// and the AudioContext is typically 48000 Hz — adding `micIndex` as if the
+// rates matched reads the reference ~2× too fast and leaks TTS into capture.
+export function farEndSampleIndex(elapsedSec, micIndex, ttsRate, micRate) {
+  if (!micRate) return Math.floor(elapsedSec * ttsRate) + (micIndex | 0)
+  return Math.floor(elapsedSec * ttsRate + micIndex * (ttsRate / micRate))
+}
+
 export async function samplesToBase64Pcm(samples) {
   const rawBlob = new Blob(
     [

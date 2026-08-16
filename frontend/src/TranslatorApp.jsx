@@ -29,7 +29,7 @@ import {
   isRepairUtterance,
   stripRepairCue,
   normalizeSttText,
-  langByCode,
+  routeSpokenTurn,
   CONTINUE_WINDOW_MS,
   REPAIR_WINDOW_MS,
   CONTINUATION_HOLD_MS,
@@ -59,9 +59,9 @@ function langsForLane(lane, lang1Index, lang2Index) {
   return { src, dst }
 }
 
-function pairForSpoken(spokenCode, src, dst) {
-  if (spokenCode === dst.code) return { src: dst, dst: src }
-  return { src, dst }
+function prewarmLang(code) {
+  if (!code) return
+  void fetch(`/api/prewarm?lang=${encodeURIComponent(code)}`).catch(() => {})
 }
 
 function TranslatorApp({ config, clearConversationRef }) {
@@ -184,6 +184,8 @@ function TranslatorApp({ config, clearConversationRef }) {
   const previousTurnRef = useRef(null)
   const continuationTimerRef = useRef(null)
   const pendingTranslateRef = useRef(null)
+  const enqueueChainRef = useRef(Promise.resolve())
+  const enqueueGenRef = useRef(0)
   const sttInflightRef = useRef(0)
   const interimAbortRef = useRef(null)
 
@@ -203,6 +205,8 @@ function TranslatorApp({ config, clearConversationRef }) {
     clearTtsPlaybackRef.current?.()
     ttsWaitQueueRef.current = []
     ttsSessionActiveRef.current = false
+    enqueueGenRef.current += 1
+    enqueueChainRef.current = Promise.resolve()
     settleTTS(false)
   }, [settleTTS])
 
@@ -286,23 +290,31 @@ function TranslatorApp({ config, clearConversationRef }) {
   const enqueueTTS = useCallback(
     async (text, targetLang, marks) => {
       if (!text) return
-      const ctx = getAudioContextRef.current()
-      if (!ctx) return
-      for (const chunk of splitTextIntoSpeechChunks(text)) {
-        const url = `/api/tts?text=${encodeURIComponent(chunk)}&lang=${encodeURIComponent(targetLang)}`
-        try {
-          const res = await fetch(url)
-          if (!res.ok) throw new Error(`TTS HTTP ${res.status}`)
-          const raw = await res.arrayBuffer()
-          const buffer = await ctx.decodeAudioData(raw.slice(0))
-          ttsQueueRef.current.pending.push({ buffer, marks })
-          pumpTTSQueue()
-        } catch (e) {
-          console.error("TTS fetch/play failed:", e)
-          stopSpeaking()
-          return
+      const gen = enqueueGenRef.current
+      const run = async () => {
+        if (enqueueGenRef.current !== gen) return
+        const ctx = getAudioContextRef.current()
+        if (!ctx) return
+        for (const chunk of splitTextIntoSpeechChunks(text)) {
+          if (enqueueGenRef.current !== gen) return
+          const url = `/api/tts?text=${encodeURIComponent(chunk)}&lang=${encodeURIComponent(targetLang)}`
+          try {
+            const res = await fetch(url)
+            if (!res.ok) throw new Error(`TTS HTTP ${res.status}`)
+            const raw = await res.arrayBuffer()
+            const buffer = await ctx.decodeAudioData(raw.slice(0))
+            if (enqueueGenRef.current !== gen) return
+            ttsQueueRef.current.pending.push({ buffer, marks })
+            pumpTTSQueue()
+          } catch (e) {
+            console.error("TTS fetch/play failed:", e)
+            stopSpeaking()
+            return
+          }
         }
       }
+      enqueueChainRef.current = enqueueChainRef.current.then(run, run)
+      return enqueueChainRef.current
     },
     [pumpTTSQueue, stopSpeaking],
   )
@@ -325,10 +337,12 @@ function TranslatorApp({ config, clearConversationRef }) {
         let ni = (lang1Index + direction + N) % N
         if (ni === lang2Index) ni = (ni + direction + N) % N
         setLang1Index(ni)
+        prewarmLang(AVAILABLE_LANGUAGES[ni].code)
       } else {
         let ni = (lang2Index + direction + N) % N
         if (ni === lang1Index) ni = (ni + direction + N) % N
         setLang2Index(ni)
+        prewarmLang(AVAILABLE_LANGUAGES[ni].code)
       }
     },
     [lang1Index, lang2Index, activeLaneRecording],
@@ -406,9 +420,11 @@ function TranslatorApp({ config, clearConversationRef }) {
     if (ttsQueueRef.current.turnId === turnId) stopSpeaking()
   }, [stopSpeaking])
 
-  // Speech detected. Same speaker within CONTINUE_WINDOW_MS glues onto the
-  // open turn. TTS from the *other* person is ducked, not cut; same-speaker
-  // redo stops that turn's stale translation.
+  // Speech detected. A trailing “och”/“and” (pendingTranslateRef) glues the
+  // next burst onto the open turn. Other speech always starts a new row so
+  // the other person is not concatenated onto this clip. TTS from the *other*
+  // person is ducked, not cut; same-speaker redo stops that turn's stale
+  // translation.
   const beginUtterance = useCallback(() => {
     const lane = activePersonRef.current
     const epoch = generationRef.current
@@ -422,14 +438,22 @@ function TranslatorApp({ config, clearConversationRef }) {
       prev && prev.lane === lane && prev.generation === epoch && prev.turnId != null
     const dtPrev = samePrev ? now - prev.at : Infinity
 
+    const waitingForCue = pendingTranslateRef.current != null
     const ttsBusy =
       ttsQueueRef.current.playing || ttsQueueRef.current.pending.length > 0
     if (ttsBusy) {
-      if (ttsQueueRef.current.lane === lane) stopSpeaking()
+      // Only cut TTS when the same speaker is clearly continuing a
+      // trailing “och”/“and”. Any other burst — including the other
+      // person talking in their language — ducks instead of chopping
+      // the translation they are answering.
+      if (waitingForCue && ttsQueueRef.current.lane === lane) stopSpeaking()
       else setTtsDuckRef.current?.(true)
     }
-
-    if (sameOpen && dtOpen < CONTINUE_WINDOW_MS) {
+    if (
+      sameOpen &&
+      waitingForCue &&
+      dtOpen < CONTINUE_WINDOW_MS + CONTINUATION_HOLD_MS
+    ) {
       clearContinuationWait()
       abortTurnPipeline(open.turnId)
       setActiveLaneRecording(lane)
@@ -816,16 +840,30 @@ function TranslatorApp({ config, clearConversationRef }) {
         return
       }
 
-      let spokenSrc = src
-      let spokenDst = dst
-      if (sttLanguage && sttLanguage !== src.code) {
-        const mapped = pairForSpoken(sttLanguage, src, dst)
-        spokenSrc = mapped.src
-        spokenDst = mapped.dst
-        if (sttLanguage !== src.code && sttLanguage !== dst.code) {
-          const third = langByCode(AVAILABLE_LANGUAGES, sttLanguage)
-          if (third) spokenSrc = third
+      const lang1 = AVAILABLE_LANGUAGES[lang1IndexRef.current]
+      const lang2 = AVAILABLE_LANGUAGES[lang2IndexRef.current]
+      const routed = routeSpokenTurn(
+        sttLanguage,
+        lane,
+        src,
+        dst,
+        lang1,
+        lang2,
+      )
+      const spokenSrc = routed.src
+      const spokenDst = routed.dst
+      if (routed.flipped) {
+        updateTurn(turnId, {
+          lane: routed.lane,
+          sourceLang: spokenSrc.code,
+          targetLang: spokenDst.code,
+        })
+        if (activePersonRef.current !== routed.lane) {
+          activePersonRef.current = routed.lane
+          setActivePerson(routed.lane)
+          playBlip("speaker")
         }
+        lane = routed.lane
       }
 
       previousTurnRef.current = {
@@ -841,6 +879,7 @@ function TranslatorApp({ config, clearConversationRef }) {
       if (openTurnRef.current?.turnId === turnId) {
         openTurnRef.current = {
           ...openTurnRef.current,
+          lane,
           src: spokenSrc,
           dst: spokenDst,
           samples: extra.samples || openTurnRef.current.samples,
@@ -894,6 +933,11 @@ function TranslatorApp({ config, clearConversationRef }) {
     }
   }
   processTranslationRef.current = processTranslation
+
+  useEffect(() => {
+    prewarmLang(AVAILABLE_LANGUAGES[lang1Index].code)
+    prewarmLang(AVAILABLE_LANGUAGES[lang2Index].code)
+  }, [lang1Index, lang2Index])
 
   // Wipe the conversation and stop anything still in flight.
   const handleClearConversation = useCallback(() => {

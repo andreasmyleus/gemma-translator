@@ -280,6 +280,8 @@ export function isBackchannel(text) {
   return t.length > 0 && BACKCHANNEL_RE.test(t)
 }
 
+// Only conjunctions people actually trail off on. "så"/"that"/"att" are
+// ordinary sentence endings and must not delay translation.
 const CONTINUATION_CUES = new Set([
   "och",
   "and",
@@ -287,24 +289,9 @@ const CONTINUATION_CUES = new Set([
   "but",
   "or",
   "eller",
-  "så",
-  "so",
-  "sen",
-  "then",
-  "att",
-  "that",
-  "för",
-  "because",
   "y",
   "et",
   "mais",
-  "que",
-  "porque",
-  "um",
-  "uh",
-  "öh",
-  "eh",
-  "euh",
 ])
 
 export function endsWithContinuationCue(text) {
@@ -333,6 +320,22 @@ export function stripRepairCue(text) {
 
 export function langByCode(languages, code) {
   return languages.find((l) => l.code === code) || null
+}
+
+// After STT, put the turn on the lane whose language was actually spoken
+// and translate into the other. Enter is only a prior — two people can
+// just talk in the two chosen languages.
+export function routeSpokenTurn(detectedCode, activeLane, src, dst, _lang1, _lang2) {
+  const code = (detectedCode || "").split("-")[0].toLowerCase()
+  if (code && code === dst.code) {
+    return {
+      lane: activeLane === 1 ? 2 : 1,
+      src: dst,
+      dst: src,
+      flipped: true,
+    }
+  }
+  return { lane: activeLane, src, dst, flipped: false }
 }
 
 // Word-safe chunking so each /api/tts request stays under ~`limit` chars.

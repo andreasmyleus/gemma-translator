@@ -15,7 +15,12 @@
  */
 
 import { useState, useRef, useCallback, useEffect } from "react"
-import { getMergedSamples, resample, samplesToBase64Pcm } from "../utils/audioHelpers"
+import {
+  farEndSampleIndex,
+  getMergedSamples,
+  resample,
+  samplesToBase64Pcm,
+} from "../utils/audioHelpers"
 
 // Energy-based VAD for continuous kiosk listening, with a short NLMS echo
 // canceller so TTS played from the speakers is subtracted from the mic before
@@ -111,6 +116,7 @@ export function useVoiceActivity({
   const speechStartedAtRef = useRef(0)
   const lastLoudAtRef = useRef(0)
   const lastLoudRmsRef = useRef(0)
+  const noiseFloorRef = useRef(0.006)
   const sampleRateRef = useRef(16000)
   const silenceHoldMsRef = useRef(0)
   const lastInterimAtRef = useRef(0)
@@ -285,10 +291,11 @@ export function useVoiceActivity({
     let xIdx = aecIdxRef.current
     let unstable = false
 
+    const elapsedSec = ctx.currentTime - tts.startedAt
+    const micRate = ctx.sampleRate || sampleRateRef.current
     for (let i = 0; i < near.length; i++) {
       let far = 0
-      const t = ctx.currentTime - tts.startedAt
-      const idx = Math.floor(t * tts.sampleRate) + i
+      const idx = farEndSampleIndex(elapsedSec, i, tts.sampleRate, micRate)
       if (idx >= 0 && idx < tts.data.length) {
         far = tts.data[idx] * (tts.gain ?? 1)
       }
@@ -340,7 +347,11 @@ export function useVoiceActivity({
           preRollRef.current.shift()
         }
         if (!armedRef.current) return
-        if (rms < SPEECH_RMS) return
+        const threshold = Math.max(SPEECH_RMS * 0.7, noiseFloorRef.current * 3.5)
+        if (rms < threshold) {
+          noiseFloorRef.current = noiseFloorRef.current * 0.98 + rms * 0.02
+          return
+        }
 
         capturingRef.current = true
         setIsCapturing(true)
