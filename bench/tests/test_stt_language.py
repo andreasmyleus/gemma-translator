@@ -21,11 +21,11 @@ REPO_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_DIR / "backend"))
 
 from server import (  # noqa: E402
-    DEFAULT_STT_MODEL,
-    can_auto_detect_without_eviction,
+    LID_MIN_MASS,
+    LID_MIN_RATIO,
     keep_stt_segment,
+    resolve_lane_language,
     resolve_spoken_language,
-    _whisper_models,
 )
 
 
@@ -49,17 +49,66 @@ class TestResolveSpokenLanguage(unittest.TestCase):
         self.assertEqual(resolve_spoken_language("en", 0.5, "sv", "en"), "en")
         self.assertEqual(resolve_spoken_language("en", 0.49, "sv", "en"), "sv")
 
-    def test_sv_en_can_detect_without_a_third_model(self):
-        self.assertTrue(can_auto_detect_without_eviction("sv", "en"))
+    def test_a_low_confidence_detect_never_steals_the_other_lane(self):
+        # Fallback-regeln, som bara används när tvåvägsvalet avstår.
+        self.assertEqual(resolve_spoken_language("sv", 0.46, "en", "sv"), "en")
+        self.assertEqual(resolve_spoken_language("sv", 0.36, "sv", "en"), "sv")
 
-    def test_two_specialised_models_skip_detect_unless_multilingual_is_warm(self):
-        _whisper_models.clear()
-        self.assertFalse(can_auto_detect_without_eviction("sv", "fi"))
-        _whisper_models[DEFAULT_STT_MODEL] = object()
-        try:
-            self.assertTrue(can_auto_detect_without_eviction("sv", "fi"))
-        finally:
-            _whisper_models.clear()
+
+class TestResolveLaneLanguage(unittest.TestCase):
+    """Tvåvägsvalet mellan banornas språk — det som faktiskt routar turen."""
+
+    def test_the_larger_lane_probability_wins(self):
+        probs = [("sv", 0.80), ("en", 0.05), ("de", 0.10)]
+        self.assertEqual(resolve_lane_language(probs, "en", "sv"), "sv")
+        self.assertEqual(resolve_lane_language(probs, "sv", "en"), "sv")
+
+    def test_a_confident_third_language_cannot_decide_the_lane(self):
+        # Den riktiga regressionen: detektorn svarade `zh` p=0.94 på 1,4 s
+        # svenska. Argmax-vägen såg ett språk utanför SUPPORTED_STT_LANGS och
+        # föll tillbaka på banans prior — alltså på den som talade *förra*
+        # turen, vilket i ett växlande samtal är fel varje gång.
+        probs = [("zh", 0.94), ("sv", 0.030), ("en", 0.003)]
+        self.assertEqual(resolve_lane_language(probs, "en", "sv"), "sv")
+
+    def test_a_coin_flip_refuses_to_guess(self):
+        # Uppmätt på sv-en-tight#2: 0.0568 mot 0.0676, kvot 1.19.
+        self.assertIsNone(
+            resolve_lane_language([("sv", 0.0568), ("en", 0.0676)], "en", "sv")
+        )
+
+    def test_a_winner_below_the_mass_floor_refuses_to_guess(self):
+        probs = [("sv", LID_MIN_MASS / 2), ("en", LID_MIN_MASS / 100)]
+        self.assertIsNone(resolve_lane_language(probs, "en", "sv"))
+
+    def test_the_ratio_floor_is_exactly_the_boundary(self):
+        low = LID_MIN_MASS * 2
+        self.assertEqual(
+            resolve_lane_language([("sv", low * LID_MIN_RATIO), ("en", low)], "en", "sv"),
+            "sv",
+        )
+        self.assertIsNone(
+            resolve_lane_language(
+                [("sv", low * LID_MIN_RATIO * 0.99), ("en", low)], "en", "sv"
+            )
+        )
+
+    def test_the_measured_base_margins_are_accepted(self):
+        # Smalaste korrekta beslutet `base` gjorde över de 27 klippen: massa
+        # 0.0478, kvot 7.2. Golven måste ligga med marginal under det.
+        self.assertEqual(
+            resolve_lane_language([("sv", 0.0478), ("en", 0.0478 / 7.2)], "en", "sv"),
+            "sv",
+        )
+
+    def test_missing_or_degenerate_input_never_guesses(self):
+        self.assertIsNone(resolve_lane_language(None, "sv", "en"))
+        self.assertIsNone(resolve_lane_language([], "sv", "en"))
+        self.assertIsNone(resolve_lane_language([("sv", 0.9)], "sv", None))
+        self.assertIsNone(resolve_lane_language([("sv", 0.9)], "sv", "sv"))
+
+    def test_a_lane_absent_from_the_distribution_counts_as_zero(self):
+        self.assertEqual(resolve_lane_language([("sv", 0.9)], "en", "sv"), "sv")
 
 
 class TestKeepSttSegment(unittest.TestCase):

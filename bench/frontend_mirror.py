@@ -27,8 +27,10 @@ Speglar:
                                   isRepairUtterance / stripRepairCue /
                                   normalizeSttText / routeSpokenTurn
   frontend/src/utils/audioHelpers.js  farEndSampleIndex
+  frontend/src/utils/audioHelpers.js  resample
   frontend/src/TranslatorApp.jsx  systemprompten i processTranslation
   frontend/src/TranslatorApp.jsx  speakCompleteSentences
+  frontend/src/hooks/useVoiceActivity.js  energi-VAD:en (segmentering)
 
 Ändras någon av dem måste den här filen ändras i samma commit.
 """
@@ -36,6 +38,8 @@ Speglar:
 import json
 import math
 import re
+
+import numpy as np
 
 SPEECH_CHUNK_LIMIT = 180
 
@@ -302,3 +306,148 @@ def parse_translation(model_response):
     # är oense om [] och {} (truthy i JS, falsy här), men en tom array/objekt
     # renderas ändå som ingenting i UI:t, så "" är rätt sträng att mäta mot.
     return parsed.get("translation") or ""
+
+
+# ---------------------------------------------------------------------------
+# Energi-VAD:en ur useVoiceActivity.js
+#
+# Konstanterna måste vara identiska med hookens, annars segmenterar bench ett
+# annat samtal än produkten hör. Testet i test_frontend_contract.py läser JS-
+# källan och fäller om någon av dem glider isär.
+# ---------------------------------------------------------------------------
+
+SPEECH_RMS = 0.015
+# En enda hangover — se kommentaren i useVoiceActivity.js för mätningen bakom
+# värdet och varför den gamla tvånivåregeln (560/1250 ms) togs bort.
+SILENCE_MS = 700
+MIN_SPEECH_MS = 400
+# Tystnad efter vilken yttrandet transkriberas spekulativt, medan hangovern
+# fortfarande löper. Se useVoiceActivity.js för resonemanget.
+SPECULATIVE_STT_MS = 340
+MAX_UTTERANCE_MS = 15000
+PRE_ROLL_CHUNKS = 4
+# createScriptProcessor(4096, 1, 1) i startListening.
+VAD_FRAME = 4096
+# Webbläsarens AudioContext körs typiskt i 48 kHz; frame-granulariteten (85 ms)
+# påverkar var VAD:en klipper, så simuleringen måste köra i samma takt.
+BROWSER_SAMPLE_RATE = 48000
+STT_SAMPLE_RATE = 16000
+
+
+def rms_of(frame):
+    """Port av rmsOf."""
+    if len(frame) == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(frame, dtype=np.float64))))
+
+
+def resample(samples, source_rate, target_rate):
+    """Port av resample() i audioHelpers.js — linjär interpolation, samma längdformel."""
+    samples = np.asarray(samples, dtype=np.float32)
+    if source_rate == target_rate:
+        return samples
+    ratio = source_rate / target_rate
+    new_length = int(round(len(samples) / ratio))
+    if new_length <= 0:
+        return np.zeros(0, dtype=np.float32)
+    positions = np.arange(new_length, dtype=np.float64) * ratio
+    index = np.floor(positions).astype(np.int64)
+    fraction = positions - index
+    index = np.clip(index, 0, len(samples) - 1)
+    nxt = np.clip(index + 1, 0, len(samples) - 1)
+    current = samples[index]
+    return (current + fraction * (samples[nxt] - current)).astype(np.float32)
+
+
+def segment_utterances(samples, sample_rate=BROWSER_SAMPLE_RATE, silence_hold_ms=0):
+    """Kör VAD:en över en sammanhängande mikrofonström och returnerar yttranden.
+
+    Speglar handleAudioProcess/finishCapture i useVoiceActivity.js, inklusive
+    pre-roll, den adaptiva brusgolvströskeln och den kortare tystnadsgränsen
+    efter ett tydligt avslut (`abrupt`). `now` är frame-callbackens tid, alltså
+    slutet på framen — precis som performance.now() i hooken.
+
+    Returnerar en lista dictar med start/slut i sekunder (mätt på det ljud som
+    faktiskt fångades, pre-roll inräknad) och själva samplen.
+    """
+    samples = np.asarray(samples, dtype=np.float32)
+    frame_ms = VAD_FRAME / sample_rate * 1000.0
+
+    capturing = False
+    armed = True
+    pre_roll = []
+    chunks = []
+    noise_floor = 0.006
+    speech_started_at = 0.0
+    speech_started_frame = 0
+    last_loud_at = 0.0
+    captured = []
+
+    total_frames = len(samples) // VAD_FRAME
+    for f in range(total_frames):
+        frame = samples[f * VAD_FRAME : (f + 1) * VAD_FRAME]
+        rms = rms_of(frame)
+        now = (f + 1) * frame_ms
+
+        if not capturing:
+            pre_roll.append(f)
+            if len(pre_roll) > PRE_ROLL_CHUNKS:
+                pre_roll.pop(0)
+            if not armed:
+                continue
+            threshold = max(SPEECH_RMS * 0.7, noise_floor * 3.5)
+            if rms < threshold:
+                noise_floor = noise_floor * 0.98 + rms * 0.02
+                continue
+            capturing = True
+            speech_started_at = now
+            last_loud_at = now
+            chunks = list(pre_roll)
+            speech_started_frame = chunks[0]
+            pre_roll = []
+            continue
+
+        chunks.append(f)
+        if rms >= SPEECH_RMS:
+            last_loud_at = now
+
+        uttered_ms = now - speech_started_at
+        silent_ms = now - last_loud_at
+        silence_need = max(SILENCE_MS, silence_hold_ms)
+        if uttered_ms >= MAX_UTTERANCE_MS or silent_ms >= silence_need:
+            capturing = False
+            # Onset -> sista höga framen, inte -> now: annars ingår hela
+            # hangovern och MIN_SPEECH_MS kan aldrig falla ut (se finishCapture).
+            duration_ms = max(0.0, last_loud_at - speech_started_at)
+            if chunks and duration_ms >= MIN_SPEECH_MS:
+                start = speech_started_frame * VAD_FRAME
+                stop = (chunks[-1] + 1) * VAD_FRAME
+                captured.append(
+                    {
+                        "start_s": start / sample_rate,
+                        "end_s": stop / sample_rate,
+                        # Tiden VAD:en stänger yttrandet på — det är här
+                        # klockan för time-to-first-audio startar (marks.keyup).
+                        "closed_at_s": now / 1000.0,
+                        "samples": samples[start:stop],
+                    }
+                )
+            chunks = []
+            pre_roll = []
+
+    # Strömmen tog slut mitt i ett yttrande: appen hade fortsatt lyssna, men
+    # för en färdiginspelad konversation är det rätt att stänga det ändå.
+    if capturing and chunks:
+        now = total_frames * frame_ms
+        if max(0.0, last_loud_at - speech_started_at) >= MIN_SPEECH_MS:
+            start = speech_started_frame * VAD_FRAME
+            stop = (chunks[-1] + 1) * VAD_FRAME
+            captured.append(
+                {
+                    "start_s": start / sample_rate,
+                    "end_s": stop / sample_rate,
+                    "closed_at_s": now / 1000.0,
+                    "samples": samples[start:stop],
+                }
+            )
+    return captured

@@ -69,17 +69,31 @@ class RunResult:
         return self.time_to_first_audio_ms + self.tts_rest_ms
 
 
-def _post_stt(api_base, samples, language):
+def _post_stt(api_base, samples, language, other_language=None, auto_language=False):
+    """POST:ar en fixtur till /api/stt och returnerar (text, språk, ms, bytes).
+
+    `auto_language` är av som default: en enarmsmätning ska hålla fixturens
+    språk låst. Samtalssimuleringen (bench/conversation.py) slår på det, för
+    där är hela poängen att detektionen får avgöra vilken bana turen hamnar på
+    — precis som i appen, som skickar auto_language: true för slutliga klipp.
+    """
     payload_b64 = base64.b64encode(samples.astype("<f4").tobytes()).decode("ascii")
+    body = {"audio_base64": payload_b64, "language": language}
+    if other_language:
+        body["other_language"] = other_language
+    if auto_language:
+        body["auto_language"] = True
     started = time.perf_counter()
-    response = requests.post(
-        f"{api_base}/api/stt",
-        json={"audio_base64": payload_b64, "language": language},
-        timeout=REQUEST_TIMEOUT,
-    )
+    response = requests.post(f"{api_base}/api/stt", json=body, timeout=REQUEST_TIMEOUT)
     elapsed_ms = (time.perf_counter() - started) * 1000
     response.raise_for_status()
-    return response.json().get("text", ""), elapsed_ms, len(payload_b64)
+    data = response.json()
+    return (
+        data.get("text", ""),
+        data.get("language") or language,
+        elapsed_ms,
+        len(payload_b64),
+    )
 
 
 def _post_llm(api_base, llm_url, model, text, src_lang, dst_lang, prompt_fn=system_prompt):
@@ -179,7 +193,7 @@ def run_fixture(api_base, llm_url, model, fixture_id, spec, prompt_fn=system_pro
         # bytt längd skulle göra jämförelser mot äldre körningar meningslösa.
         check_duration(fixture_id, spec, samples)
 
-        result.transcript, result.stt_ms, result.upload_bytes = _post_stt(
+        result.transcript, _stt_lang, result.stt_ms, result.upload_bytes = _post_stt(
             api_base, samples, spec["lang"]
         )
         if not result.transcript.strip():

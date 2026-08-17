@@ -112,22 +112,24 @@ function TranslatorApp({ config, clearConversationRef }) {
     [lang1Index, lang2Index],
   )
 
-  // Sentences waiting to be spoken. Each entry is { player, marks }: the Audio
-  // element is already constructed (creating it starts the fetch, so queued
-  // chunks download while the current one plays), and `marks` is the timing
-  // object that was current when the chunk was queued.
+  // One TTS *session* per turn that speaks, played in creation order. Each
+  // session owns its own `pending` list of { buffer, marks } — the fetch and
+  // decode start as soon as a sentence is ready, so a later turn can download
+  // ahead while an earlier one is still on the speakers.
+  //
+  // Per-session queues are the point: with a single shared queue, an
+  // overlapping turn's sentences were appended to whichever session happened to
+  // be playing, its seal ended *that* session, and the two drifted permanently
+  // out of step.
   //
   // `sealed` is what lets an asynchronously-drained queue still honour the
-  // onFinished(played) contract: mid-stream an empty queue only means
-  // the next sentence hasn't been generated yet, so "finished" is *sealed and
-  // drained with nothing playing*. `onFinished` fires exactly once per session.
-  const ttsQueueRef = useRef({
-    pending: [],
-    playing: false,
-    sealed: false,
-    played: false,
-    onFinished: null,
-  })
+  // onFinished(played) contract: mid-stream an empty `pending` only means the
+  // next sentence hasn't arrived yet. A session is finished when it is sealed,
+  // drained, and has no enqueue call still in flight (`outstanding`) — sealing
+  // alone would settle it before its last fetch returned. `onFinished` fires
+  // exactly once per session.
+  const ttsSessionsRef = useRef([])
+  const ttsPlayingRef = useRef(false)
 
   // Epoch bumped only on clear — overlapping speech and Enter must not kill
   // a turn that is still being transcribed or spoken.
@@ -161,13 +163,26 @@ function TranslatorApp({ config, clearConversationRef }) {
     [updateTurn],
   )
 
-  // Hand the session its one and only verdict for the current playback.
-  const settleTTS = useCallback((played) => {
-    const queue = ttsQueueRef.current
-    const onFinished = queue.onFinished
-    queue.onFinished = null
+  // Hand a session its one and only verdict.
+  const settleTTS = useCallback((session, played) => {
+    const onFinished = session.onFinished
+    session.onFinished = null
     onFinished?.(played)
   }, [])
+
+  // True while any session has audio playing or decoded and waiting.
+  const isSpeaking = useCallback(
+    () =>
+      ttsPlayingRef.current ||
+      ttsSessionsRef.current.some((s) => s.pending.length > 0),
+    [],
+  )
+  // Lane of the session that owns the speakers right now.
+  const speakingLane = useCallback(
+    () => ttsSessionsRef.current[0]?.lane ?? null,
+    [],
+  )
+
 
   // Filled once the VAD hook mounts — TTS playback needs the shared context.
   const getAudioContextRef = useRef(() => null)
@@ -176,153 +191,194 @@ function TranslatorApp({ config, clearConversationRef }) {
   const setTtsDuckRef = useRef(() => {})
   const getTtsGainNodeRef = useRef(() => null)
   const setSilenceHoldRef = useRef(() => {})
-  // Serialize TTS sessions when overlapping turns both want to speak.
-  const ttsWaitQueueRef = useRef([])
-  const ttsSessionActiveRef = useRef(false)
   // Last turn that may still accept a continuation or repair.
   const openTurnRef = useRef(null)
   const previousTurnRef = useRef(null)
   const continuationTimerRef = useRef(null)
   const pendingTranslateRef = useRef(null)
-  const enqueueChainRef = useRef(Promise.resolve())
-  const enqueueGenRef = useRef(0)
   const sttInflightRef = useRef(0)
   const interimAbortRef = useRef(null)
+  // Speculative transcription started during the VAD hangover, keyed by turn.
+  const earlySttRef = useRef(null)
 
-  const stopSpeaking = useCallback(() => {
-    const queue = ttsQueueRef.current
-    queue.pending = []
-    queue.playing = false
-    queue.sealed = false
-    if (onlineAudioPlayerRef.current) {
-      try {
-        onlineAudioPlayerRef.current.stop()
-      } catch (_) {
-        /* already stopped */
-      }
-      onlineAudioPlayerRef.current = null
+  // Detach and stop whatever is on the speakers. The detached source's
+  // `onended` still fires, so it is nulled here *and* guarded in pumpTTSQueue:
+  // a stale callback would otherwise advance — and stamp `played` on — the
+  // session that took its place.
+  const stopCurrentSource = useCallback(() => {
+    const source = onlineAudioPlayerRef.current
+    onlineAudioPlayerRef.current = null
+    ttsPlayingRef.current = false
+    if (!source) return
+    source.onended = null
+    try {
+      source.stop()
+    } catch (_) {
+      /* already stopped */
     }
     clearTtsPlaybackRef.current?.()
-    ttsWaitQueueRef.current = []
-    ttsSessionActiveRef.current = false
-    enqueueGenRef.current += 1
-    enqueueChainRef.current = Promise.resolve()
-    settleTTS(false)
-  }, [settleTTS])
+  }, [])
+
+  const stopSpeaking = useCallback(() => {
+    const sessions = ttsSessionsRef.current
+    ttsSessionsRef.current = []
+    stopCurrentSource()
+    // Every session gets its verdict, including ones that never reached the
+    // speakers — dropping them silently left their turn without a meta line.
+    for (const session of sessions) {
+      session.cancelled = true
+      session.pending = []
+      settleTTS(session, session.played)
+    }
+  }, [settleTTS, stopCurrentSource])
 
   const pumpTTSQueue = useCallback(() => {
-    const queue = ttsQueueRef.current
-    if (queue.playing) return
-    const entry = queue.pending.shift()
-    if (!entry) {
-      if (queue.sealed) settleTTS(queue.played)
-      return
-    }
-    const { buffer, marks } = entry
+    if (ttsPlayingRef.current) return
     const ctx = getAudioContextRef.current()
-    if (!ctx || !buffer) {
-      queue.playing = false
-      stopSpeaking()
-      return
-    }
-    queue.playing = true
-    const source = ctx.createBufferSource()
-    source.buffer = buffer
-    const gain = getTtsGainNodeRef.current?.()
-    source.connect(gain || ctx.destination)
-    onlineAudioPlayerRef.current = source
+    // Sessions play strictly in order; a drained one is retired so the next
+    // turn's audio starts in the same tick.
+    for (;;) {
+      const session = ttsSessionsRef.current[0]
+      if (!session) return
+      const entry = session.pending.shift()
+      if (!entry) {
+        // Empty mid-stream only means the next sentence is still being fetched.
+        // `outstanding` is what makes the seal wait for it instead of settling
+        // the session a beat before its own audio arrives.
+        if (!session.sealed || session.outstanding > 0) return
+        ttsSessionsRef.current.shift()
+        settleTTS(session, session.played)
+        continue
+      }
+      const { buffer, marks } = entry
+      if (!ctx || !buffer) {
+        stopSpeaking()
+        return
+      }
+      const source = ctx.createBufferSource()
+      source.buffer = buffer
+      const gain = getTtsGainNodeRef.current?.()
+      source.connect(gain || ctx.destination)
+      onlineAudioPlayerRef.current = source
+      ttsPlayingRef.current = true
 
-    const data =
-      buffer.numberOfChannels > 0
-        ? buffer.getChannelData(0)
-        : new Float32Array(0)
-    const startedAt = ctx.currentTime + 0.02
-    setTtsPlaybackRef.current(data, buffer.sampleRate, startedAt)
-    source.onended = () => {
-      queue.playing = false
-      queue.played = true
-      clearTtsPlaybackRef.current?.()
-      onlineAudioPlayerRef.current = null
-      pumpTTSQueue()
-    }
-    try {
-      source.start(startedAt)
-      reportLatency(marks, true)
-    } catch (e) {
-      console.error("Audio play error:", e)
-      queue.playing = false
-      stopSpeaking()
+      const data =
+        buffer.numberOfChannels > 0
+          ? buffer.getChannelData(0)
+          : new Float32Array(0)
+      const startedAt = ctx.currentTime + 0.02
+      setTtsPlaybackRef.current(data, buffer.sampleRate, startedAt)
+      source.onended = () => {
+        if (onlineAudioPlayerRef.current !== source) return
+        ttsPlayingRef.current = false
+        session.played = true
+        clearTtsPlaybackRef.current?.()
+        onlineAudioPlayerRef.current = null
+        pumpTTSQueue()
+      }
+      try {
+        source.start(startedAt)
+        reportLatency(marks, true)
+      } catch (e) {
+        console.error("Audio play error:", e)
+        stopSpeaking()
+      }
+      return
     }
   }, [reportLatency, settleTTS, stopSpeaking])
 
-  const beginTTSSession = useCallback(
-    (onFinished, meta) => {
-      const start = () => {
-        const queue = ttsQueueRef.current
-        settleTTS(false)
-        queue.pending = []
-        queue.playing = false
-        queue.sealed = false
-        queue.played = false
-        queue.turnId = meta?.turnId ?? null
-        queue.lane = meta?.lane ?? null
-        ttsSessionActiveRef.current = true
-        queue.onFinished = (played) => {
-          ttsSessionActiveRef.current = false
-          onFinished?.(played)
-          const next = ttsWaitQueueRef.current.shift()
-          next?.()
-        }
-      }
-      if (
-        ttsSessionActiveRef.current ||
-        ttsQueueRef.current.playing ||
-        ttsQueueRef.current.pending.length > 0
-      ) {
-        ttsWaitQueueRef.current.push(start)
-      } else {
-        start()
-      }
+  // Open a session for `meta.turnId` and return it. The caller must pass the
+  // returned session to enqueueTTS/sealTTSQueue — that handle is what keeps one
+  // turn's sentences out of another turn's queue.
+  const beginTTSSession = useCallback((onFinished, meta) => {
+    const session = {
+      turnId: meta?.turnId ?? null,
+      lane: meta?.lane ?? null,
+      pending: [],
+      sealed: false,
+      played: false,
+      cancelled: false,
+      outstanding: 0,
+      // Chunks of one session must reach its queue in text order.
+      chain: Promise.resolve(),
+      onFinished,
+    }
+    ttsSessionsRef.current.push(session)
+    return session
+  }, [])
+
+  // Drop one turn's session without touching the others (same-speaker redo).
+  const cancelTTSForTurn = useCallback(
+    (turnId) => {
+      const sessions = ttsSessionsRef.current
+      const index = sessions.findIndex((s) => s.turnId === turnId)
+      if (index === -1) return
+      const [session] = sessions.splice(index, 1)
+      session.cancelled = true
+      session.pending = []
+      // Only the head session can be the one on the speakers.
+      if (index === 0) stopCurrentSource()
+      settleTTS(session, session.played)
+      pumpTTSQueue()
     },
-    [settleTTS],
+    [pumpTTSQueue, settleTTS, stopCurrentSource],
   )
 
   const enqueueTTS = useCallback(
-    async (text, targetLang, marks) => {
-      if (!text) return
-      const gen = enqueueGenRef.current
+    (session, text, targetLang, marks) => {
+      if (!session || !text) return
+      // Incremented before the chain so a seal in the very next statement
+      // already sees this call as outstanding.
+      session.outstanding += 1
       const run = async () => {
-        if (enqueueGenRef.current !== gen) return
-        const ctx = getAudioContextRef.current()
-        if (!ctx) return
-        for (const chunk of splitTextIntoSpeechChunks(text)) {
-          if (enqueueGenRef.current !== gen) return
-          const url = `/api/tts?text=${encodeURIComponent(chunk)}&lang=${encodeURIComponent(targetLang)}`
-          try {
+        try {
+          if (session.cancelled) return
+          const ctx = getAudioContextRef.current()
+          if (!ctx) return
+          for (const chunk of splitTextIntoSpeechChunks(text)) {
+            if (session.cancelled) return
+            const url = `/api/tts?text=${encodeURIComponent(chunk)}&lang=${encodeURIComponent(targetLang)}`
             const res = await fetch(url)
             if (!res.ok) throw new Error(`TTS HTTP ${res.status}`)
             const raw = await res.arrayBuffer()
             const buffer = await ctx.decodeAudioData(raw.slice(0))
-            if (enqueueGenRef.current !== gen) return
-            ttsQueueRef.current.pending.push({ buffer, marks })
+            if (session.cancelled) return
+            session.pending.push({ buffer, marks })
             pumpTTSQueue()
-          } catch (e) {
-            console.error("TTS fetch/play failed:", e)
-            stopSpeaking()
-            return
           }
+        } catch (e) {
+          // One sentence failing is not a reason to silence the rest of the
+          // turn, let alone the turn queued behind it.
+          console.error("TTS fetch/play failed:", e)
+        } finally {
+          session.outstanding -= 1
+          // The seal may have been waiting on exactly this call.
+          if (!session.cancelled) pumpTTSQueue()
         }
       }
-      enqueueChainRef.current = enqueueChainRef.current.then(run, run)
-      return enqueueChainRef.current
+      session.chain = session.chain.then(run, run)
+      return session.chain
     },
-    [pumpTTSQueue, stopSpeaking],
+    [pumpTTSQueue],
   )
 
-  const sealTTSQueue = useCallback(() => {
-    ttsQueueRef.current.sealed = true
-    pumpTTSQueue()
-  }, [pumpTTSQueue])
+  const sealTTSQueue = useCallback(
+    (session) => {
+      if (!session) return
+      session.sealed = true
+      pumpTTSQueue()
+    },
+    [pumpTTSQueue],
+  )
+
+  // Error paths outside runTranslate cannot see the session handle; seal by
+  // turn instead, so a half-built session still settles and still reports.
+  const sealTTSForTurn = useCallback(
+    (turnId) => {
+      sealTTSQueue(ttsSessionsRef.current.find((s) => s.turnId === turnId))
+    },
+    [sealTTSQueue],
+  )
 
   // Rotate a lane's language, skipping the slot held by the other lane
   // (the two lanes may never show the same language).
@@ -406,19 +462,26 @@ function TranslatorApp({ config, clearConversationRef }) {
         const run = pendingTranslateRef.current
         pendingTranslateRef.current = null
         continuationTimerRef.current = null
+        // Nobody continued, so give the VAD its normal patience back. The only
+        // other reset runs in the *next* turn's processTranslation — far too
+        // late: that turn's capture had already paid the extra 1400 ms.
+        setSilenceHoldRef.current?.(0)
         run?.()
       }, CONTINUE_WINDOW_MS)
     },
     [clearContinuationWait],
   )
 
-  const abortTurnPipeline = useCallback((turnId) => {
-    if (turnId == null) return
-    const c = inflightByTurnRef.current.get(turnId)
-    c?.abort()
-    inflightByTurnRef.current.delete(turnId)
-    if (ttsQueueRef.current.turnId === turnId) stopSpeaking()
-  }, [stopSpeaking])
+  const abortTurnPipeline = useCallback(
+    (turnId) => {
+      if (turnId == null) return
+      const c = inflightByTurnRef.current.get(turnId)
+      c?.abort()
+      inflightByTurnRef.current.delete(turnId)
+      cancelTTSForTurn(turnId)
+    },
+    [cancelTTSForTurn],
+  )
 
   // Speech detected. A trailing “och”/“and” (pendingTranslateRef) glues the
   // next burst onto the open turn. Other speech always starts a new row so
@@ -439,14 +502,12 @@ function TranslatorApp({ config, clearConversationRef }) {
     const dtPrev = samePrev ? now - prev.at : Infinity
 
     const waitingForCue = pendingTranslateRef.current != null
-    const ttsBusy =
-      ttsQueueRef.current.playing || ttsQueueRef.current.pending.length > 0
-    if (ttsBusy) {
+    if (isSpeaking()) {
       // Only cut TTS when the same speaker is clearly continuing a
       // trailing “och”/“and”. Any other burst — including the other
       // person talking in their language — ducks instead of chopping
       // the translation they are answering.
-      if (waitingForCue && ttsQueueRef.current.lane === lane) stopSpeaking()
+      if (waitingForCue && speakingLane() === lane) stopSpeaking()
       else setTtsDuckRef.current?.(true)
     }
     if (
@@ -513,7 +574,14 @@ function TranslatorApp({ config, clearConversationRef }) {
       },
     ])
     return utterance
-  }, [abortTurnPipeline, clearContinuationWait, stopSpeaking, updateTurn])
+  }, [
+    abortTurnPipeline,
+    clearContinuationWait,
+    isSpeaking,
+    speakingLane,
+    stopSpeaking,
+    updateTurn,
+  ])
 
   // Silence after speech — or Enter cutting the capture short. Mic stays armed
   // so more speech during STT/LLM can open another turn. `utteranceFromCapture`
@@ -530,6 +598,19 @@ function TranslatorApp({ config, clearConversationRef }) {
       const dst = utterance?.dst
       const lane = utterance?.lane
 
+      // Claim the hangover-time transcription before any early return, so a
+      // dropped or superseded capture cannot leave it running and holding the
+      // backend's STT lock against the next turn.
+      const early = earlySttRef.current
+      earlySttRef.current = null
+      // Reusable only when the hook confirms no speech followed the clip it
+      // took; otherwise that clip is not this turn's full text.
+      const knownTextPromise =
+        early && early.turnId === turnId && payload?.earlyUsable
+          ? early.promise
+          : null
+      if (early && !knownTextPromise) early.controller.abort()
+
       if (
         generation == null ||
         turnId == null ||
@@ -537,6 +618,7 @@ function TranslatorApp({ config, clearConversationRef }) {
         !dst ||
         generationRef.current !== generation
       ) {
+        early?.controller.abort()
         abandonActiveTurn(turnId)
         rearmMic()
         return
@@ -576,7 +658,7 @@ function TranslatorApp({ config, clearConversationRef }) {
           dst,
           generation,
           marks,
-          { merge: utterance.merge, samples },
+          { merge: utterance.merge, samples, knownTextPromise },
         )
       }
 
@@ -596,6 +678,32 @@ function TranslatorApp({ config, clearConversationRef }) {
     },
     [abandonActiveTurn, rearmMic],
   )
+
+  // The VAD heard silence but has not closed the capture yet. Transcribe now,
+  // during the hangover, so the turn can start translating the moment it does.
+  // Fire-and-forget: endUtterance picks the promise up if the hook confirms the
+  // clip was the whole utterance, and simply ignores it otherwise.
+  const handleEarlyEnd = useCallback((payload, utterance) => {
+    if (!payload?.base64Data || !utterance?.turnId) return
+    if (generationRef.current !== utterance.generation) return
+    // A continuation glues this clip onto the previous one's samples, so a
+    // transcription of this clip alone would not be the turn's text.
+    if (utterance.merge === "continue") return
+    interimAbortRef.current?.abort()
+    const controller = new AbortController()
+    sttInflightRef.current += 1
+    const promise = transcribeAudio(payload.base64Data, utterance.src.code, {
+      otherLanguage: utterance.dst.code,
+      autoLanguage: true,
+      signal: controller.signal,
+    }).finally(() => {
+      sttInflightRef.current -= 1
+    })
+    // Nobody may be waiting on this promise; an unhandled rejection here is
+    // noise, and endUtterance re-reads it with its own catch.
+    promise.catch(() => {})
+    earlySttRef.current = { turnId: utterance.turnId, promise, controller }
+  }, [])
 
   const handleInterim = useCallback(
     (payload, utterance) => {
@@ -640,6 +748,7 @@ function TranslatorApp({ config, clearConversationRef }) {
     onSpeechStart: beginUtterance,
     onSpeechEnd: endUtterance,
     onInterim: handleInterim,
+    onEarlyEnd: handleEarlyEnd,
     enabled: true,
   })
   setArmedRef.current = setArmed
@@ -696,15 +805,17 @@ function TranslatorApp({ config, clearConversationRef }) {
         status: "translating",
       })
 
-      if (cfg.enableTts) {
-        beginTTSSession(
-          (played) => {
-            if (!isCurrent()) return
-            if (!played) reportLatency(marks, false)
-          },
-          { turnId, lane },
-        )
-      }
+      // This turn's own queue. Held locally, never looked up globally, so an
+      // overlapping turn can neither append to it nor wipe it.
+      const ttsSession = cfg.enableTts
+        ? beginTTSSession(
+            (played) => {
+              if (!isCurrent()) return
+              if (!played) reportLatency(marks, false)
+            },
+            { turnId, lane },
+          )
+        : null
 
       let spokenChars = 0
       const speakCompleteSentences = (full, isFinal) => {
@@ -726,7 +837,7 @@ function TranslatorApp({ config, clearConversationRef }) {
           return
         }
         spokenChars = upto
-        if (cfg.enableTts) void enqueueTTS(ready, spokenDst.ttsLang, marks)
+        if (ttsSession) void enqueueTTS(ttsSession, ready, spokenDst.ttsLang, marks)
       }
 
       const result = await translateTextStreaming(
@@ -746,6 +857,10 @@ function TranslatorApp({ config, clearConversationRef }) {
       )
 
       if (!isCurrent()) {
+        // Leaving an unsealed session at the head of the queue would stall
+        // every turn behind it. handleClearConversation has normally cleared it
+        // already, in which case this is a no-op.
+        cancelTTSForTurn(turnId)
         dropIfSuperseded()
         return
       }
@@ -753,26 +868,52 @@ function TranslatorApp({ config, clearConversationRef }) {
       if (result.translation !== result.raw) spokenChars = 0
       updateTurn(turnId, { targetText: result.translation, status: "done" })
       speakCompleteSentences(result.translation, true)
-      if (!cfg.enableTts) reportLatency(marks, false)
-      if (cfg.enableTts) sealTTSQueue()
+      if (!ttsSession) reportLatency(marks, false)
+      sealTTSQueue(ttsSession)
     }
 
     let keepInflight = false
     try {
       let transcribedText
       let sttLanguage = src.code
-      if (extra.knownText) {
+      let stt = null
+      if (extra.knownTextPromise) {
+        // Started while the VAD was still counting out the hangover, so this
+        // usually resolves immediately — that is the whole point.
+        try {
+          stt = await extra.knownTextPromise
+        } catch (err) {
+          if (err.name !== "AbortError") {
+            console.error("speculative STT failed, retranscribing:", err)
+          }
+          stt = null
+        }
+      }
+      if (stt) {
+        transcribedText = normalizeSttText(stt.text || "")
+        sttLanguage = stt.language || src.code
+        if (marks) marks.stt = performance.now()
+      } else if (extra.knownText) {
         transcribedText = normalizeSttText(extra.knownText)
         if (marks) marks.stt = performance.now()
       } else {
+        // The decrement lives in a finally scoped to exactly this await. The
+        // outer catch used to decrement too, so any failure *after* STT (or the
+        // knownText path, which never increments) undercounted the real number
+        // of in-flight requests — and handleInterim then queued an interim
+        // behind a final transcription on the backend's single STT lock.
         sttInflightRef.current += 1
         interimAbortRef.current?.abort()
-        const stt = await transcribeAudio(base64Data, src.code, {
-          otherLanguage: dst.code,
-          autoLanguage: true,
-          signal: controller.signal,
-        })
-        sttInflightRef.current = Math.max(0, sttInflightRef.current - 1)
+        let stt
+        try {
+          stt = await transcribeAudio(base64Data, src.code, {
+            otherLanguage: dst.code,
+            autoLanguage: true,
+            signal: controller.signal,
+          })
+        } finally {
+          sttInflightRef.current -= 1
+        }
         transcribedText = normalizeSttText(stt.text || "")
         sttLanguage = stt.language || src.code
       }
@@ -897,7 +1038,7 @@ function TranslatorApp({ config, clearConversationRef }) {
             }
             console.error(err)
             updateTurn(turnId, { status: "error", error: err.message })
-            sealTTSQueue()
+            sealTTSForTurn(turnId)
           })
           .finally(() => {
             inflightByTurnRef.current.delete(turnId)
@@ -920,14 +1061,13 @@ function TranslatorApp({ config, clearConversationRef }) {
       setSilenceHoldRef.current?.(0)
       await runTranslate(spokenSrc, spokenDst, transcribedText)
     } catch (err) {
-      sttInflightRef.current = Math.max(0, sttInflightRef.current - 1)
       if (err.name === "AbortError" || !isCurrent()) {
         dropIfSuperseded()
         return
       }
       console.error(err)
       updateTurn(turnId, { status: "error", error: err.message })
-      sealTTSQueue()
+      sealTTSForTurn(turnId)
     } finally {
       if (!keepInflight) inflightByTurnRef.current.delete(turnId)
     }
@@ -944,6 +1084,8 @@ function TranslatorApp({ config, clearConversationRef }) {
     generationRef.current += 1
     clearContinuationWait()
     interimAbortRef.current?.abort()
+    earlySttRef.current?.controller.abort()
+    earlySttRef.current = null
     for (const c of inflightByTurnRef.current.values()) c.abort()
     inflightByTurnRef.current.clear()
     activeTurnIdRef.current = null
