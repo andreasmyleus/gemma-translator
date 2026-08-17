@@ -317,6 +317,24 @@ class TestPlaybackPathContract(unittest.TestCase):
         claim = end.index("const early = earlySttRef.current")
         self.assertLess(claim, end.index("abandonActiveTurn(turnId)"))
 
+    def test_captured_frames_are_copied_out_of_the_scriptprocessor_buffer(self):
+        # cancelEcho returnerar `near` *själv* på sina genvägar, och `near` är
+        # ScriptProcessorns indatabuffert, som Web Audio återanvänder till nästa
+        # callback. Utan kopian aliaserar alla lagrade chunkar samma minne och
+        # hela yttrandet blir det mikrofonen råkade höra sist — i praktiken
+        # tystnad mellan orden. Uppmätt i Chrome: klipp med peak=0.000 nådde
+        # STT och transkriberades till "". Ingen [latency]-rad loggades alls.
+        vad = read(VAD_JS)
+        self.assertIn(
+            "filtered === inputData ? new Float32Array(inputData) : filtered", vad
+        )
+        loop = vad.split("const handleAudioProcess")[1]
+        self.assertNotIn(
+            "const cleaned = cancelEcho(inputData)",
+            loop,
+            "den filtrerade framen får inte lagras utan kopia",
+        )
+
     def test_aec_tap_loops_stay_off_the_modulo_path(self):
         # onaudioprocess kör på huvudtråden. 1024 tappar × 48 kHz med en modulo
         # per tapp, plus en 1024-termers effektsumma per sample, är för mycket

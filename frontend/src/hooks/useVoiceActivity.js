@@ -444,7 +444,16 @@ export function useVoiceActivity({
       const inputData = e.inputBuffer.getChannelData(0)
       // Always run AEC so the filter stays adapted while TTS plays, even when
       // we are not capturing — otherwise the first frames of a barge-in are dirty.
-      const cleaned = cancelEcho(inputData)
+      const filtered = cancelEcho(inputData)
+      // cancelEcho returns `near` *itself* on each of its bypass paths (no
+      // far-end, silent far-end, unstable filter), and `near` is the
+      // ScriptProcessor's input buffer, which Web Audio reuses for the next
+      // callback. Storing it aliases every captured chunk to the same memory,
+      // so a whole utterance decays into whatever the mic last heard — silence
+      // between words. Observed as captures with peak=0.000 reaching STT and
+      // transcribing to "". Copy unless cancelEcho already allocated.
+      const cleaned =
+        filtered === inputData ? new Float32Array(inputData) : filtered
       const rms = rmsOf(cleaned)
       const now = performance.now()
 
