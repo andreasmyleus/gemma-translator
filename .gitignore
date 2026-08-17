@@ -23,3 +23,4 @@ server.log
 *.ogg
 *.flac
 coverage/
+bench/fixtures/

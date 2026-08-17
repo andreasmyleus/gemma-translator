@@ -138,6 +138,65 @@ Things worth knowing before you run it:
   (model, prompt or streaming), including when the older run predates
   provenance recording. WER is still compared: it has no time component.
 
+### Conversation replay
+
+`bench.bench` measures one utterance at a time, with the language and the lane
+handed to it. That hides every failure that only exists *between* turns. A
+second harness replays a whole two-person conversation instead:
+
+```bash
+venv/bin/python3 -m bench.conversation --id sv-en-cafe --save conv-sv-en-cafe
+```
+
+It renders every turn of `bench/conversations.json` with the product's own Piper
+voices, concatenates them into **one continuous microphone stream** with the
+spec's pauses between speakers, and then runs the real chain over it: the same
+energy VAD the browser uses (at 48 kHz, mirrored in `bench/frontend_mirror.py`)
+finds the utterance boundaries itself, the language detector decides which lane
+each turn belongs to, and nobody presses Enter. Every stage is the product's —
+same endpoints, same payloads, same frontend logic.
+
+That is what catches segmentation and routing bugs. The first run of
+`sv-en-directions` turned 5 spoken turns into 2 captures, because the VAD's
+silence hangover was longer than an ordinary gap between two people, so both
+speakers landed in one utterance and were translated as a single text.
+
+Two numbers are reported per turn:
+
+- **time-to-first-audio** — STT + LLM-to-first-sentence + TTS. Comparable with
+  `bench.bench`, and with the app's own on-screen meter, which starts its clock
+  when the VAD closes the capture.
+- **perceived** — last syllable to first audio, so the VAD hangover is included.
+  This is the number a user actually experiences, and the one worth optimizing;
+  the app's meter cannot see it.
+
+The committed runs in `bench/results/conv-*.json` are the baseline that
+`bench/tests/test_conversation.py` gates on: one utterance per spoken turn, no
+capture spanning two speakers, every turn routed to the lane whose language was
+spoken, and a ceiling on both latency numbers. Regenerate them with `--save`
+after a deliberate change. `BENCH_LIVE=1 pytest bench/tests -k Live` re-runs the
+whole chain instead of reading the committed baseline (needs the stack up).
+
+**`--save` refuses to write a baseline measured on a busy machine.** The same
+confound described under [Latency](#latency) applies here and is worse, because
+a conversation baseline is *committed* and then silently accepted as the bar for
+every later run. One batch taken at load 4.7 (an unrelated VM at 41% CPU)
+inflated STT, LLM and TTS by roughly 2× simultaneously — three stages sharing
+nothing but the processor. The harness therefore samples load *before* it starts
+(measuring afterwards would report its own work) and waits for the machine to
+settle, which also keeps two conversations run back-to-back from contaminating
+each other. `--force` saves anyway, for when only correctness matters.
+
+The five conversations cover what one utterance cannot:
+
+| Conversation | What it is for |
+| :--- | :--- |
+| `sv-en-cafe` | ordinary pace, seven turns |
+| `sv-en-directions` | short turns at ~1.0 s gaps |
+| `sv-en-tight` | 0.85 s gaps — the floor for turn-taking |
+| `sv-en-same-speaker` | three turns from one person; the lane must not flip |
+| `sv-fi-pharmacy` | two specialised checkpoints, one per lane |
+
 ### The GPU model variant (Mac only, opt-in)
 
 On machines with a supported GPU, litert-lm also serves the same weights as
@@ -316,6 +375,52 @@ That is the honest shape of the result: most ideas on the original list
 turned out not to matter on this fixture set, and finding that out with a
 paired measurement before building all of them — rather than shipping each
 one on faith — was the point of the campaign.
+
+### What the single-utterance harness could not see
+
+The three largest wins in the whole campaign turned up only once a *whole
+conversation* was replayed through the chain (see
+[Conversation replay](#conversation-replay)), because all three live between
+turns rather than inside one:
+
+| Change | Effect |
+| :--- | :--- |
+| Language ID moved to a dedicated `faster-whisper-base`, outside the LRU | 858 ms → 274 ms per turn |
+| VAD hangover 560/1250 ms → a single measured 700 ms | −550 ms per turn, and it is what stopped two speakers landing in one utterance |
+| STT started speculatively 340 ms into the silence | up to −360 ms; STT now overlaps the hangover instead of queueing behind it |
+
+Language ID is decided by comparing only the **two lane languages** out of the
+detector's full distribution, not by taking its argmax over ~100 languages. The
+argmax is the wrong question — the utterance is one of the two configured lanes
+— and getting it wrong was expensive: an argmax of `zh` at p=0.94 on 1.4 s of
+Swedish is not a supported language, so the old rule fell back to the lane
+prior, i.e. to whoever spoke *last*. In an alternating conversation that prior
+is wrong every time, so one detector miss became a whole turn transcribed in the
+wrong language. Restricting the comparison turned four such misses into one
+across 27 clips, and it is why the smaller `tiny` checkpoint was measured and
+rejected: its correct and incorrect calls overlap (narrowest correct 1.21×, its
+miss 1.19×), so no confidence threshold separates them, while `base` decided all
+27 correctly with a worst margin of 7.2×.
+
+Measured back-to-back on one machine, perceived latency — last syllable to
+first audio, which is what the user actually waits through — went from
+**4885 ms to 2712 ms** on `sv-en-cafe` and from **5458 ms to 2366 ms** on
+`sv-en-directions`. Median STT WER on the café conversation fell from 0.125 to
+0.091 at the same time, because the routing stopped feeding mixed-language
+captures to Whisper.
+
+Those two numbers are a same-session before/after pair and nothing else. The
+committed baselines report higher absolute times because they were taken later,
+on a machine with more background load, where the untouched LLM stage was also
+~2× slower. That is exactly why `test_conversation.py` records latency but does
+not gate on it — see the docstring on
+`test_both_latency_numbers_are_recorded_for_every_turn`.
+
+Language ID was the clearest case of a cost that a single-arm fixture run
+structurally cannot show: it only runs when `auto_language` is on, and
+`bench.bench` deliberately keeps it off so fixture languages stay locked. It
+was a second full `small` encoder pass on every auto-routed utterance —
+roughly doubling STT — and it had been sitting in the product unmeasured.
 
 ## Raspberry Pi Appliance Deployment
 

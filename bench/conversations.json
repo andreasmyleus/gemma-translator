@@ -1,0 +1,199 @@
+{
+  "sv-en-cafe": {
+    "description": "Två personer på ett kafé, svenska mot engelska. Ingen trycker Enter — turerna ska routas på det språk som faktiskt talas.",
+    "lane1": "sv",
+    "lane2": "en",
+    "turns": [
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Hej, jag skulle vilja beställa en kopp kaffe och en smörgås.",
+        "gap_after_s": 1.4
+      },
+      {
+        "speaker": 2,
+        "lang": "en",
+        "text": "Of course. Would you like milk with your coffee?",
+        "gap_after_s": 1.2
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Ja tack, gärna lite mjölk. Har ni något glutenfritt bröd?",
+        "gap_after_s": 1.6
+      },
+      {
+        "speaker": 2,
+        "lang": "en",
+        "text": "Yes, we have gluten free sourdough. It costs two euros extra.",
+        "gap_after_s": 1.2
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Det går bra. Kan jag betala med kort?",
+        "gap_after_s": 1.3
+      },
+      {
+        "speaker": 2,
+        "lang": "en",
+        "text": "Absolutely, we take all major cards. Your table number is fourteen.",
+        "gap_after_s": 1.5
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Tack så mycket, då sätter jag mig där borta vid fönstret.",
+        "gap_after_s": 1.0
+      }
+    ]
+  },
+  "sv-en-directions": {
+    "description": "Kortare turer och tätare tempo — testar att VAD inte klistrar ihop två talare.",
+    "lane1": "sv",
+    "lane2": "en",
+    "turns": [
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Ursäkta, var ligger järnvägsstationen?",
+        "gap_after_s": 1.1
+      },
+      {
+        "speaker": 2,
+        "lang": "en",
+        "text": "Go straight ahead and turn left at the church.",
+        "gap_after_s": 1.0
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Hur lång tid tar det att gå?",
+        "gap_after_s": 1.1
+      },
+      {
+        "speaker": 2,
+        "lang": "en",
+        "text": "About ten minutes.",
+        "gap_after_s": 1.0
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Tack, det var snällt.",
+        "gap_after_s": 1.0
+      }
+    ]
+  },
+  "sv-fi-pharmacy": {
+    "description": "Två specialiserade checkpoints (kb-whisper + finsk medium). Detta par hade ingen autoroutning alls innan språkdetektorn flyttades utanför LRU:n — det ska fungera nu utan att banorna evakuerar varandra.",
+    "lane1": "sv",
+    "lane2": "fi",
+    "turns": [
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Hej, har ni något mot huvudvärk?",
+        "gap_after_s": 1.3
+      },
+      {
+        "speaker": 2,
+        "lang": "fi",
+        "text": "Kyllä, meillä on särkylääkettä.",
+        "gap_after_s": 1.2
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Hur många tabletter kan jag ta per dag?",
+        "gap_after_s": 1.3
+      },
+      {
+        "speaker": 2,
+        "lang": "fi",
+        "text": "Enintään kolme tablettia päivässä.",
+        "gap_after_s": 1.2
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Tack, det var bra att veta.",
+        "gap_after_s": 1.0
+      }
+    ]
+  },
+  "sv-en-same-speaker": {
+    "description": "Samma person talar tre turer i rad innan den andra svarar. Autoroutningen får inte flippa bana bara för att turen är ny.",
+    "lane1": "sv",
+    "lane2": "en",
+    "turns": [
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Jag har bokat ett rum för två nätter.",
+        "gap_after_s": 1.2
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Det ska vara med havsutsikt.",
+        "gap_after_s": 1.2
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Och jag kommer sent på kvällen.",
+        "gap_after_s": 1.3
+      },
+      {
+        "speaker": 2,
+        "lang": "en",
+        "text": "That is all noted. Reception is open all night.",
+        "gap_after_s": 1.2
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Perfekt, tack så mycket.",
+        "gap_after_s": 1.0
+      }
+    ]
+  },
+  "sv-en-tight": {
+    "description": "Pauser på 0,85 s — kortare än något annat samtal och nära hangovern. Golvet för hur snabbt två personer kan turas om.",
+    "lane1": "sv",
+    "lane2": "en",
+    "turns": [
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Vad kostar en biljett till centrum?",
+        "gap_after_s": 0.85
+      },
+      {
+        "speaker": 2,
+        "lang": "en",
+        "text": "Three euros for a single ticket.",
+        "gap_after_s": 0.85
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Kan jag köpa den ombord?",
+        "gap_after_s": 0.85
+      },
+      {
+        "speaker": 2,
+        "lang": "en",
+        "text": "Yes, but only with a card.",
+        "gap_after_s": 0.85
+      },
+      {
+        "speaker": 1,
+        "lang": "sv",
+        "text": "Då tar jag en sådan.",
+        "gap_after_s": 1.0
+      }
+    ]
+  }
+}

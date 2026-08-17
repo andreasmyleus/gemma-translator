@@ -62,6 +62,32 @@ STT_NO_SPEECH_PROB = float(os.environ.get("STT_NO_SPEECH_PROB", "0.5"))
 # the default — set STT_VAD=0 to restore the old path.
 STT_VAD = os.environ.get("STT_VAD", "1") == "1"
 MAX_MODELS = 2
+# Dedicated checkpoint for language-id only, held outside the MAX_MODELS LRU.
+#
+# Language-id is a full encoder pass, and it used to run on DEFAULT_STT_MODEL —
+# so every auto-routed utterance paid two `small` encoder passes instead of one.
+# Measured over 27 conversation clips (bench/conversations.json, five samtal),
+# deciding between the two lane languages as resolve_lane_language does:
+#
+#   small  858 ms   27/27   smallest winning margin 17.8x
+#   base   274 ms   27/27   smallest winning margin  7.2x
+#   tiny   153 ms   26/27   smallest winning margin  1.21x
+#
+# `base` is the default because tiny's correct and incorrect answers *overlap*
+# (its one miss won by 1.19x, its narrowest correct call was 1.21x), so no
+# confidence threshold can separate them — the failure mode is a short Swedish
+# clip landing on the other lane and being transcribed as English.
+#
+# Keeping it out of the LRU is what lets a specialised pair (sv/fi) auto-route at
+# all: a third `small`-sized entry would have evicted a lane model on every turn.
+# base int8 is ~75 MB, so the extra resident memory is affordable on a Pi.
+STT_LID_MODEL = os.environ.get("STT_LID_MODEL", "Systran/faster-whisper-base")
+# Floors for trusting the two-language comparison. Both sit far below `base`'s
+# measured worst correct call (mass 0.048, ratio 7.2) — they exist to catch a
+# genuine coin flip, not to second-guess the detector.
+LID_MIN_MASS = 0.02
+LID_MIN_RATIO = 2.0
+_lid_model = None
 # Loaded at startup so the two default lanes never stall on a first utterance.
 # Keep this within MAX_MODELS or the entries just evict each other.
 PREWARM_LANGS = ("sv", "en")
@@ -152,6 +178,18 @@ def get_whisper_model(model_id=None):
         )
         return _whisper_models[model_id]
 
+def get_lid_model():
+    """Load (or reuse) the language-id checkpoint. Never LRU-evicted."""
+    global _lid_model
+    with _stt_lock:
+        if _lid_model is None:
+            from faster_whisper import WhisperModel
+
+            print(f"[STT] Loading language-id model ({STT_LID_MODEL}, int8)...")
+            _lid_model = WhisperModel(STT_LID_MODEL, device="cpu", compute_type="int8")
+        return _lid_model
+
+
 def keep_stt_segment(segment):
     """False when Whisper is decoding silence as confident radio/TV copy.
 
@@ -174,23 +212,20 @@ def transcribe(audio_np, language, other_language=None, auto_language=False):
 
     Returns (text, resolved_language). Unknown languages are auto-detected.
     `auto_language` (product default) runs a cheap language-id pass on the
-    multilingual checkpoint and, if it is confident the *other* lane was
-    spoken, re-routes STT to that language. Bench leaves this off so fixture
-    language stays locked.
+    dedicated LID checkpoint and re-routes STT to whichever of the two lanes
+    was actually spoken. Bench leaves this off so fixture language stays locked.
     """
     expected = language if language in SUPPORTED_STT_LANGS else None
     other = other_language if other_language in SUPPORTED_STT_LANGS else None
     resolved = expected
-    if (
-        auto_language
-        and expected is not None
-        and len(audio_np) >= int(16000 * 0.6)
-        and can_auto_detect_without_eviction(expected, other)
-    ):
+    if auto_language and expected is not None and len(audio_np) >= int(16000 * 0.6):
         try:
-            detector = get_whisper_model(DEFAULT_STT_MODEL)
-            detected, prob, _ = detector.detect_language(audio_np)
-            resolved = resolve_spoken_language(detected, prob, expected, other)
+            detected, prob, all_probs = get_lid_model().detect_language(audio_np)
+            # Prefer the two-way comparison; fall back to the argmax rule only
+            # when the detector genuinely cannot separate the two lanes.
+            resolved = resolve_lane_language(all_probs, expected, other)
+            if resolved is None:
+                resolved = resolve_spoken_language(detected, prob, expected, other)
         except Exception as e:
             print(f"[STT] language detect failed, using {expected}: {e}", flush=True)
             resolved = expected
@@ -219,6 +254,37 @@ def transcribe(audio_np, language, other_language=None, auto_language=False):
     return text, out_lang
 
 
+def resolve_lane_language(all_probs, expected, other):
+    """Pick between the two lane languages, or None when the detector cannot.
+
+    `detect_language` returns the whole distribution, not just its argmax, and
+    the argmax is the wrong question here: the utterance is one of the two
+    configured lanes, so this is a two-way decision, not a ~100-way one.
+
+    It matters because of what the argmax path did with a miss. On 1.4 s of
+    Swedish the tiny detector answered `zh` at p=0.94; `zh` is not a supported
+    language, so resolve_spoken_language fell back to the lane prior — i.e. to
+    whoever spoke *last*. In an alternating conversation that prior is wrong
+    every time, so one detector miss became a whole turn transcribed in the
+    wrong language and "translated" into gibberish. Restricting the choice to
+    the two lanes turned four such misses into one across the bench corpus.
+
+    Returning None means "do not guess": the caller keeps the old rule.
+    """
+    if not all_probs or not expected or not other or expected == other:
+        return None
+    probs = dict(all_probs)
+    p_expected = float(probs.get(expected, 0.0))
+    p_other = float(probs.get(other, 0.0))
+    if p_expected >= p_other:
+        winner, hi, lo = expected, p_expected, p_other
+    else:
+        winner, hi, lo = other, p_other, p_expected
+    if hi < LID_MIN_MASS or hi < lo * LID_MIN_RATIO:
+        return None
+    return winner
+
+
 def resolve_spoken_language(detected, probability, expected, other=None):
     """Lane language is the prior; a confident other-lane (or supported) id wins.
 
@@ -241,24 +307,11 @@ def resolve_spoken_language(detected, probability, expected, other=None):
     return code
 
 
-def can_auto_detect_without_eviction(expected, other=None):
-    """True when language-id can use a checkpoint that is already a lane model.
-
-    sv/en (and any pair that includes multilingual `small`) is free. Two
-    specialised checkpoints (sv/fi) would evict one of them to load `small`
-    just for detect — skip that and keep the lane prior.
-    """
-    ids = {stt_model_for(expected)}
-    if other:
-        ids.add(stt_model_for(other))
-    if DEFAULT_STT_MODEL in ids:
-        return True
-    return DEFAULT_STT_MODEL in _whisper_models
-
-
 # Överskrivbar så att bench/ kan köra en egen instans parallellt med en
 # vanlig utvecklingsserver på 3000.
 PORT = int(os.environ.get("PORT", 3000))
+# The only port /proxy will forward to (see start.sh: LITERT_PORT).
+LLM_PORT = int(os.environ.get("LITERT_PORT", 9379))
 
 class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     def end_headers(self):
@@ -284,12 +337,21 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b'Error: Missing "url" query parameter.')
             return
 
-        # Restrict target URL to local LLM endpoint (http/https localhost/127.0.0.1)
+        # Restrict target URL to the local LLM endpoint (http/https localhost).
+        # The port must be stated explicitly: allowing a missing port let
+        # `http://localhost/...` (port 80/443) through the check that the error
+        # message below claims to enforce.
         parsed_target = urllib.parse.urlparse(target_url)
-        if parsed_target.scheme not in ('http', 'https') or parsed_target.hostname not in ('localhost', '127.0.0.1') or parsed_target.port not in (9379, None):
+        if (
+            parsed_target.scheme not in ('http', 'https')
+            or parsed_target.hostname not in ('localhost', '127.0.0.1')
+            or parsed_target.port != LLM_PORT
+        ):
             self.send_response(403)
             self.end_headers()
-            self.wfile.write(b'Forbidden: Proxy target must be localhost:9379')
+            self.wfile.write(
+                f'Forbidden: Proxy target must be localhost:{LLM_PORT}'.encode('utf-8')
+            )
             return
 
         print(f"[Proxy] Routing {self.command} request to: {target_url}")
@@ -733,6 +795,8 @@ if __name__ == '__main__':
         print(f"===========================================================")
         def _prewarm_models():
             try:
+                print("[Prewarm] Loading language-id model...", flush=True)
+                get_lid_model()
                 for lang in PREWARM_LANGS:
                     model_id = stt_model_for(lang)
                     print(f"[Prewarm] Loading STT {lang} -> {model_id}...", flush=True)

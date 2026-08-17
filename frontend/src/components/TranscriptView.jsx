@@ -87,10 +87,6 @@ export default function TranscriptView({
       !text &&
       ((isSource && turn.status === "transcribing") ||
         (!isSource && turn.status === "translating"))
-    // No speech detected: mark the source side so the user can tell the
-    // recording registered. No translation was attempted, so the target side
-    // stays blank.
-    const showMuted = turn.status === "empty" && isSource
     // Superseded / aborted before anything landed — muted dash, not pending.
     const showCancelled =
       turn.status === "cancelled" && !text && isSource && !showError
@@ -104,9 +100,6 @@ export default function TranscriptView({
           <span className="transcript-pending">
             {isSource ? "— listening —" : "— translating —"}
           </span>
-        ) : null}
-        {showMuted ? (
-          <span className="transcript-muted">— no speech detected —</span>
         ) : null}
         {showCancelled ? <span className="transcript-muted">—</span> : null}
         {showError ? (

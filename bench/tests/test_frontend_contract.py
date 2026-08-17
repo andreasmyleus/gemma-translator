@@ -62,6 +62,7 @@ class TestSystemPromptIsInSync(unittest.TestCase):
 class TestPlaybackPathContract(unittest.TestCase):
     def setUp(self):
         self.source = read(TRANSLATOR_APP)
+        self.source_vad = read(VAD_JS)
 
     def test_playback_binds_its_own_marks_object(self):
         # Commit 08c6df0. Läses timingRef.current om inuti onplaying kan en sent
@@ -96,7 +97,9 @@ class TestPlaybackPathContract(unittest.TestCase):
         )
 
     def test_meta_line_is_written_even_with_tts_disabled(self):
-        self.assertIn("if (!cfg.enableTts) reportLatency(marks, false)", self.source)
+        # ttsSession är null exakt när cfg.enableTts är av; utan uppspelning
+        # finns ingen onFinished som kan rapportera latensen.
+        self.assertIn("if (!ttsSession) reportLatency(marks, false)", self.source)
 
     def test_enter_mid_capture_finishes_the_utterance_instead_of_cancelling(self):
         # Enter byter person mitt i ett yttrande: klippet ska STT:as och spelas
@@ -131,7 +134,7 @@ class TestPlaybackPathContract(unittest.TestCase):
             "const endUtterance"
         )[0]
         self.assertIn("setTtsDuckRef.current?.(true)", begin)
-        self.assertIn("ttsQueueRef.current.lane === lane", begin)
+        self.assertIn("speakingLane() === lane", begin)
 
     def test_same_speaker_continuation_reuses_the_open_turn(self):
         begin = self.source.split("const beginUtterance")[1].split(
@@ -177,7 +180,59 @@ class TestPlaybackPathContract(unittest.TestCase):
         enqueue = self.source.split("const enqueueTTS")[1].split(
             "const sealTTSQueue"
         )[0]
-        self.assertIn("enqueueChainRef", enqueue)
+        self.assertIn("session.chain = session.chain.then(run, run)", enqueue)
+
+    def test_each_turn_speaks_through_its_own_session(self):
+        # En delad kö lät en överlappande tur lägga sina meningar i den tur som
+        # just spelade, och dess seal avslutade *den* sessionen — de två gled
+        # permanent ur fas. Sessionshandtaget måste följa med hela vägen.
+        self.assertIn("const ttsSessionsRef = useRef([])", self.source)
+        enqueue = self.source.split("const enqueueTTS")[1].split(
+            "const sealTTSQueue"
+        )[0]
+        self.assertIn("session.pending.push({ buffer, marks })", enqueue)
+        self.assertIn(
+            "enqueueTTS(ttsSession, ready, spokenDst.ttsLang, marks)",
+            self.source,
+            "speakCompleteSentences måste tala in i sin egen turs session.",
+        )
+
+    def test_seal_waits_for_the_fetches_it_sealed_over(self):
+        # sealTTSQueue() kördes synkront efter ett `void enqueueTTS(...)`, så en
+        # kort översättning settlade sessionen innan sin egen ljudchunk fanns:
+        # metaraden skrev "ljud —" och nästa tur startade för tidigt.
+        pump = self.source.split("const pumpTTSQueue")[1].split(
+            "const beginTTSSession"
+        )[0]
+        self.assertIn("session.outstanding > 0", pump)
+        enqueue = self.source.split("const enqueueTTS")[1].split(
+            "const sealTTSQueue"
+        )[0]
+        self.assertIn("session.outstanding += 1", enqueue)
+        self.assertIn("session.outstanding -= 1", enqueue)
+
+    def test_a_stale_onended_cannot_advance_the_next_session(self):
+        pump = self.source.split("const pumpTTSQueue")[1].split(
+            "const beginTTSSession"
+        )[0]
+        self.assertIn("if (onlineAudioPlayerRef.current !== source) return", pump)
+
+    def test_continuation_hold_is_released_when_nobody_continues(self):
+        # Annars betalar nästa yttrande — från vem som helst — 1400 ms extra
+        # tystnad innan VAD stänger det.
+        arm = self.source.split("const armContinuationWait")[1].split(
+            "const abortTurnPipeline"
+        )[0]
+        self.assertIn("setSilenceHoldRef.current?.(0)", arm)
+
+    def test_stt_inflight_is_balanced_around_the_await(self):
+        # Den yttre catchen dekrementerade också, så fel *efter* STT (och
+        # knownText-vägen, som aldrig inkrementerar) räknade ner för mycket.
+        self.assertNotIn(
+            "sttInflightRef.current = Math.max(0, sttInflightRef.current - 1)",
+            self.source,
+        )
+        self.assertIn("} finally {\n          sttInflightRef.current -= 1", self.source)
 
     def test_continuation_cues_exclude_ordinary_endings(self):
         cues = read(API_JS).split("const CONTINUATION_CUES")[1].split(
@@ -199,6 +254,79 @@ class TestPlaybackPathContract(unittest.TestCase):
             vad,
             "AEC must not treat mic samples as TTS samples.",
         )
+
+    def test_vad_timing_constants_match_the_bench_mirror(self):
+        # Bench segmenterar samtalen med sin egen kopia av VAD:en. Glider en
+        # konstant isär mäter bench ett annat samtal än produkten hör, och
+        # segmenteringsgrindarna i test_conversation.py blir meningslösa.
+        from bench.frontend_mirror import (
+            MIN_SPEECH_MS,
+            PRE_ROLL_CHUNKS,
+            SILENCE_MS,
+            SPECULATIVE_STT_MS,
+            SPEECH_RMS,
+            VAD_FRAME,
+        )
+
+        vad = read(VAD_JS)
+        for name, value in [
+            ("SPEECH_RMS", SPEECH_RMS),
+            ("SILENCE_MS", SILENCE_MS),
+            ("MIN_SPEECH_MS", MIN_SPEECH_MS),
+            ("SPECULATIVE_STT_MS", SPECULATIVE_STT_MS),
+            ("PRE_ROLL_CHUNKS", PRE_ROLL_CHUNKS),
+        ]:
+            match = re.search(rf"^const {name} = ([0-9.]+)$", vad, re.MULTILINE)
+            self.assertIsNotNone(match, f"hittar inte {name} i useVoiceActivity.js")
+            self.assertEqual(
+                float(match.group(1)), float(value), f"{name} skiljer sig mot spegeln"
+            )
+        self.assertIn(f"createScriptProcessor(\n        {VAD_FRAME},", vad)
+
+    def test_the_two_tier_silence_rule_is_gone(self):
+        # lastLoudRms mätte utklingningen, alltså yttrandets tystaste tal, så
+        # kortvägen fyrade slumpmässigt och resten föll på 1250 ms — längre än
+        # en vanlig paus mellan två talare.
+        vad = read(VAD_JS)
+        loop = vad.split("const handleAudioProcess")[1]
+        self.assertNotIn("SILENCE_MS_LONG", loop)
+        self.assertNotIn("abrupt", loop)
+        self.assertIn("Math.max(SILENCE_MS, silenceHoldMsRef.current)", loop)
+
+    def test_short_utterance_guard_measures_speech_not_hangover(self):
+        # `now - startedAt` innehöll alltid hela hangovern, som är längre än
+        # MIN_SPEECH_MS — så grinden kunde aldrig falla ut och varje hostning
+        # kostade ett STT-anrop.
+        finish = self.source_vad.split("const finishCapture")[1].split(
+            "const cancelCapture"
+        )[0]
+        self.assertIn("Math.max(0, lastLoudAt - startedAt)", finish)
+
+    def test_speculative_stt_result_is_only_used_when_no_speech_followed(self):
+        vad = read(VAD_JS)
+        self.assertIn("earlySpeechAfterRef.current = true", vad)
+        self.assertIn(
+            "const earlyUsable = earlyFiredRef.current && !earlySpeechAfterRef.current",
+            vad,
+        )
+        self.assertIn("payload?.earlyUsable", self.source)
+        self.assertIn("extra.knownTextPromise", self.source)
+        # Måste hämtas före varje tidig return, annars fortsätter en kastad
+        # spekulativ förfrågan hålla backendens STT-lås mot nästa tur.
+        end = self.source.split("const endUtterance")[1].split("const handleInterim")[0]
+        claim = end.index("const early = earlySttRef.current")
+        self.assertLess(claim, end.index("abandonActiveTurn(turnId)"))
+
+    def test_aec_tap_loops_stay_off_the_modulo_path(self):
+        # onaudioprocess kör på huvudtråden. 1024 tappar × 48 kHz med en modulo
+        # per tapp, plus en 1024-termers effektsumma per sample, är för mycket
+        # för en Pi. Fönstret ska vara sammanhängande och effekten löpande.
+        vad = read(VAD_JS)
+        cancel = vad.split("const cancelEcho")[1].split("const handleAudioProcess")[0]
+        self.assertNotIn("% AEC_FILTER_LEN", cancel)
+        self.assertIn("for (let k = 0; k < N; k++) y += w[k] * xHist[p + k]", cancel)
+        self.assertIn("pow += v * v - dropped * dropped", cancel)
+        self.assertIn("aecZeroRunRef.current >= N", cancel)
 
 
 class TestStreamingEnvelopeContract(unittest.TestCase):
