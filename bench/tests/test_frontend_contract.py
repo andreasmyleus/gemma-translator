@@ -362,3 +362,49 @@ class TestStreamingEnvelopeContract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLoadSheddingContract(unittest.TestCase):
+    """Kön är obegränsad; det enda som hindrar en kollaps är att arbete kastas.
+
+    Uppmätt i en webbläsarkörning: tiden från tal till ljud steg 18 s, 29 s,
+    33 s, 38 s och kom aldrig tillbaka. Varje tur väntade på alla föregående,
+    så en tillfällig överbelastning blev permanent — ingenting i systemet gav
+    någonsin upp något arbete.
+    """
+
+    def setUp(self):
+        self.source = read(TRANSLATOR_APP)
+        self.api = read(API_JS)
+
+    def test_a_turn_too_far_behind_is_shown_but_not_spoken(self):
+        self.assertIn("export const STALE_SPEECH_MS", self.api)
+        self.assertIn("const tooLateToSpeak = behindMs > STALE_SPEECH_MS", self.source)
+        self.assertIn("cfg.enableTts && !tooLateToSpeak", self.source)
+
+    def test_shedding_drops_audio_not_the_translation(self):
+        # Texten måste fortfarande skrivas ut — annars är lastavlastningen
+        # bara ett sätt att tappa turer.
+        run = self.source.split("const runTranslate")[1].split("let keepInflight")[0]
+        self.assertIn('status: "translating"', run)
+        self.assertIn("updateTurn(turnId, { targetText: result.translation", run)
+
+    def test_interim_previews_are_throttled_and_skippable(self):
+        # Interims var 56% av all STT-tid: 26 stycken mot 7 riktiga
+        # transkriptioner på kafésamtalet, var och en en full encoder-pass.
+        vad = read(VAD_JS)
+        interim_ms = int(re.search(r"^const INTERIM_MS = (\d+)$", vad, re.M).group(1))
+        interim_min = int(re.search(r"^const INTERIM_MIN_MS = (\d+)$", vad, re.M).group(1))
+        self.assertGreaterEqual(interim_ms, 2500, "för tät interim-takt sänker kedjan")
+        self.assertGreaterEqual(interim_min, 2000)
+        # Backenden måste kunna vägra en interim i stället för att köa den,
+        # eftersom ett avbrutet fetch inte stoppar handlern.
+        server = read(SERVER_PY)
+        self.assertIn("_stt_lock.acquire(blocking=False)", server)
+        self.assertIn("interim skipped (busy)", server)
+        # ...och avkoda dem på den lätta checkpointen.
+        self.assertIn("fast=True", server)
+        # Klienten måste märka dem, annars kan backenden inte skilja en
+        # förhandsvisning från den transkription en tur faktiskt väntar på.
+        self.assertIn("interim: true", self.source)
+        self.assertIn("interim: interim || undefined", self.api)
