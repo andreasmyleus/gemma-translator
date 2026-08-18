@@ -56,7 +56,7 @@ export async function testConnectionAPI(endpointUrl, useProxy, apiKey) {
 export async function transcribeAudio(
   base64Data,
   sourceLangCode,
-  { otherLanguage, autoLanguage = true, signal } = {},
+  { otherLanguage, autoLanguage = true, signal, interim = false } = {},
 ) {
   const response = await fetch("/api/stt", {
     method: "POST",
@@ -66,6 +66,10 @@ export async function transcribeAudio(
       language: sourceLangCode,
       other_language: otherLanguage || undefined,
       auto_language: !!autoLanguage,
+      // Marks the request as skippable. Aborting the fetch does not stop the
+      // backend, so without this an abandoned interim still holds the STT lock
+      // against the transcription the turn is waiting for.
+      interim: interim || undefined,
     }),
     signal,
   })
@@ -271,6 +275,23 @@ export const CONTINUE_WINDOW_MS = 1500
 export const REPAIR_WINDOW_MS = 4000
 // Extra VAD silence after a trailing conjunction ("och", "and", …).
 export const CONTINUATION_HOLD_MS = 1400
+
+// How far behind a turn may fall before it stops being spoken aloud.
+//
+// The pipeline has no queue bound: STT, LLM and TTS all share one machine, and
+// when their combined service time per turn exceeds the rate people take turns
+// at, every turn waits for all of its predecessors. Measured in a browser run
+// under load, time-from-speaking-to-audio climbed 18 s, 29 s, 33 s, 38 s and
+// never recovered — a transient overload became permanent, because nothing in
+// the system ever gives up any work.
+//
+// TTS is the largest sheddable term (~3.5 s/turn under that load, against ~0.5 s
+// idle) and the least essential: the translation is still on screen. So a turn
+// this far behind is shown but not spoken, which returns capacity to the turns
+// still arriving and lets the backlog drain. Silence is the right failure mode —
+// hearing a translation of what someone said half a minute ago is worse than
+// not hearing it.
+export const STALE_SPEECH_MS = 8000
 
 const BACKCHANNEL_RE =
   /^(m+h?m+|uh+|u+m+|öh+|äh+|eh+|euh+|hmm+|huh+|tsk+)$/iu

@@ -33,6 +33,7 @@ import {
   CONTINUE_WINDOW_MS,
   REPAIR_WINDOW_MS,
   CONTINUATION_HOLD_MS,
+  STALE_SPEECH_MS,
 } from "./utils/api"
 import { concatSamples, samplesToBase64Pcm } from "./utils/audioHelpers"
 import { playBlip } from "./utils/audio-blip"
@@ -716,6 +717,7 @@ function TranslatorApp({ config, clearConversationRef }) {
       transcribeAudio(payload.base64Data, utterance.src.code, {
         otherLanguage: utterance.dst.code,
         autoLanguage: false,
+        interim: true,
         signal: ac.signal,
       })
         .then((stt) => {
@@ -805,9 +807,22 @@ function TranslatorApp({ config, clearConversationRef }) {
         status: "translating",
       })
 
+      // Load shedding. A turn that is already this far behind has lost the
+      // conversation: speaking it now would talk over whatever is being said
+      // instead, and the TTS work would push the turns behind it further back
+      // still. Show it, do not speak it — that is the term that lets a backlog
+      // drain instead of compounding.
+      const behindMs = marks ? performance.now() - marks.keyup : 0
+      const tooLateToSpeak = behindMs > STALE_SPEECH_MS
+      if (tooLateToSpeak) {
+        console.warn(
+          `[tts] turn ${turnId} is ${behindMs | 0}ms behind — showing without speaking`,
+        )
+      }
+
       // This turn's own queue. Held locally, never looked up globally, so an
       // overlapping turn can neither append to it nor wipe it.
-      const ttsSession = cfg.enableTts
+      const ttsSession = cfg.enableTts && !tooLateToSpeak
         ? beginTTSSession(
             (played) => {
               if (!isCurrent()) return

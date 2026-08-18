@@ -207,8 +207,12 @@ def keep_stt_segment(segment):
     return no_speech < STT_NO_SPEECH_PROB
 
 
-def transcribe(audio_np, language, other_language=None, auto_language=False):
+def transcribe(audio_np, language, other_language=None, auto_language=False, fast=False):
     """Transcribe 16 kHz mono float32 samples.
+
+    `fast` decodes on the resident language-id checkpoint instead of the lane
+    model. It exists for interim previews, where the text is transient and the
+    cost is not: see handle_stt for the arithmetic that made this necessary.
 
     Returns (text, resolved_language). Unknown languages are auto-detected.
     `auto_language` (product default) runs a cheap language-id pass on the
@@ -230,8 +234,14 @@ def transcribe(audio_np, language, other_language=None, auto_language=False):
             print(f"[STT] language detect failed, using {expected}: {e}", flush=True)
             resolved = expected
 
-    model_id = stt_model_for(resolved) if resolved in SUPPORTED_STT_LANGS else DEFAULT_STT_MODEL
-    segments, info = get_whisper_model(model_id).transcribe(
+    if fast:
+        model = get_lid_model()
+    else:
+        model_id = (
+            stt_model_for(resolved) if resolved in SUPPORTED_STT_LANGS else DEFAULT_STT_MODEL
+        )
+        model = get_whisper_model(model_id)
+    segments, info = model.transcribe(
         audio_np,
         language=resolved if resolved in SUPPORTED_STT_LANGS else None,
         beam_size=1,
@@ -496,6 +506,9 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             language = data.get('language', 'en')
             other_language = data.get('other_language')
             auto_language = bool(data.get('auto_language', False))
+            # Interim requests paint live text while someone is still speaking.
+            # They are decorative; the turn does not wait on them.
+            interim = bool(data.get('interim', False))
             raw_data = base64.b64decode(audio_b64)
 
             # The browser sends a raw Float32Array buffer (16 kHz mono).
@@ -509,13 +522,53 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 flush=True,
             )
 
-            with _stt_lock:
-                text, resolved = transcribe(
-                    audio_np,
-                    language,
-                    other_language=other_language,
-                    auto_language=auto_language,
+            # Interims are the reason live translation collapsed under its own
+            # load. They fire every INTERIM_MS while someone talks, so a 4.3 s
+            # utterance produced ~3.7 of them plus the real transcription — and
+            # every one was a full 30 s-padded encoder pass on the lane model.
+            # Over the café conversation that is 33 calls x ~1.1 s = 36 s of STT
+            # for 34 s of speech: utilisation 1.07, so the queue grew without
+            # bound and each turn's latency was the sum of every turn before it
+            # (measured in the browser: keyup->stt 4 s, 6 s, 8 s, 15 s, ... 28 s).
+            #
+            # No amount of prioritising fixes an oversubscribed queue, so the
+            # offered load has to come down. Two measures, both here:
+            #   * `fast` decodes interims on the resident base checkpoint
+            #     (~0.27 s against ~1.1 s), taking utilisation to ~0.43;
+            #   * a busy interim is dropped outright rather than queued.
+            # The second matters because aborting the fetch client-side does not
+            # stop this handler — it would keep the lock and transcribe for a
+            # reader that has gone away. Skipping a preview costs a repaint;
+            # running it costs a turn.
+            if interim and not _stt_lock.acquire(blocking=False):
+                print("[STT] interim skipped (busy)", flush=True)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"text": "", "language": language, "skipped": True}).encode("utf-8")
                 )
+                return
+
+            if interim:
+                try:
+                    text, resolved = transcribe(
+                        audio_np,
+                        language,
+                        other_language=other_language,
+                        auto_language=auto_language,
+                        fast=True,
+                    )
+                finally:
+                    _stt_lock.release()
+            else:
+                with _stt_lock:
+                    text, resolved = transcribe(
+                        audio_np,
+                        language,
+                        other_language=other_language,
+                        auto_language=auto_language,
+                    )
             print(f"[STT] Transcribed: {text!r} (lang={resolved})", flush=True)
 
             self.send_response(200)

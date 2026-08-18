@@ -63,8 +63,22 @@ const MIN_SPEECH_MS = 400
 const SPECULATIVE_STT_MS = 340
 const MAX_UTTERANCE_MS = 15000
 const PRE_ROLL_CHUNKS = 4
-const INTERIM_MS = 1100
-const INTERIM_MIN_MS = 700
+// Interim previews are throttled hard, because they are what made live
+// translation collapse under its own load. Each one is a full transcription,
+// and at the old 700 ms / 1100 ms the café conversation produced 26 of them
+// against 7 real transcriptions — 56% of all STT time for text that is
+// overwritten seconds later. Backend utilisation came out at 1.07, i.e. above
+// capacity on an *idle* machine, so the queue grew without bound and each
+// turn's latency was the sum of every turn before it.
+//
+// The preview is worth most on a long utterance, where the wait is long enough
+// to notice, and worth least on a short one, where the final text lands almost
+// as soon as the preview would. So: none until 2.5 s of speech, then every 3 s.
+// That is ~1 preview per average utterance instead of ~3.7, and takes
+// utilisation to ~0.6 with the feature intact. See handle_stt for the two
+// backend measures that go with it (fast checkpoint, drop-when-busy).
+const INTERIM_MS = 3000
+const INTERIM_MIN_MS = 2500
 const TTS_DUCK_GAIN = 0.12
 // ~21 ms of taps at 48 kHz — short speaker→mic path on a kiosk desk.
 const AEC_FILTER_LEN = 1024
@@ -444,7 +458,16 @@ export function useVoiceActivity({
       const inputData = e.inputBuffer.getChannelData(0)
       // Always run AEC so the filter stays adapted while TTS plays, even when
       // we are not capturing — otherwise the first frames of a barge-in are dirty.
-      const cleaned = cancelEcho(inputData)
+      const filtered = cancelEcho(inputData)
+      // cancelEcho returns `near` *itself* on each of its bypass paths (no
+      // far-end, silent far-end, unstable filter), and `near` is the
+      // ScriptProcessor's input buffer, which Web Audio reuses for the next
+      // callback. Storing it aliases every captured chunk to the same memory,
+      // so a whole utterance decays into whatever the mic last heard — silence
+      // between words. Observed as captures with peak=0.000 reaching STT and
+      // transcribing to "". Copy unless cancelEcho already allocated.
+      const cleaned =
+        filtered === inputData ? new Float32Array(inputData) : filtered
       const rms = rmsOf(cleaned)
       const now = performance.now()
 
